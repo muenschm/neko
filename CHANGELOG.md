@@ -2,6 +2,9 @@
 
 ## Develop
 
+- Added the `reichardt` wall model, based on Reichardt's law of the wall,
+  which blends the viscous sublayer, buffer layer and logarithmic region in a
+  single formula. Only the CPU backend is currently supported.
 - Error and warning routines are now hooked to pFUnit's exceptions, making it
   possible to test for error emission.
 - Added format-independent checkpoint payloads for registering named fields,
