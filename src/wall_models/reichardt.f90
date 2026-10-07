@@ -45,12 +45,13 @@ module reichardt
   use registry, only : neko_registry
   use json_utils, only : json_get_or_lookup
   use reichardt_cpu, only : reichardt_compute_cpu
+  use reichardt_device, only : reichardt_compute_device
   use field_math, only : field_invcol3
   use vector, only : vector_t
   use math, only : masked_gather_copy_0
+  use device_math, only : device_masked_gather_copy_0
   use scratch_registry, only : neko_scratch_registry
   use logger, only : LOG_SIZE, neko_log
-  use utils, only : neko_error
 
   implicit none
   private
@@ -59,7 +60,6 @@ module reichardt
   !! \f$ u^+ = \frac{1}{\kappa} \ln(1 + \kappa y^+) + 7.8 \left[1 -
   !! e^{-y^+/11} - \frac{y^+}{11} e^{-y^+/3} \right] \f$.
   !! Reference: https://doi.org/10.1002/zamm.19510310704
-  !! @note Only implemented for the CPU backend.
   type, public, extends(wall_model_t) :: reichardt_t
      !> The von Karman coefficient.
      real(kind=rp) :: kappa = 0.41_rp
@@ -123,8 +123,6 @@ contains
     type(json_file), intent(inout) :: json
     character(len=LOG_SIZE) :: log_buf
 
-    call reichardt_check_backend()
-
     call this%partial_init_base(coef, scheme_name, json)
     call json_get_or_lookup(json, "kappa", this%kappa)
 
@@ -175,8 +173,6 @@ contains
     class(wall_sampler_t), allocatable, intent(inout) :: sampler
     real(kind=rp), intent(in) :: kappa
 
-    call reichardt_check_backend()
-
     call this%free()
     call this%init_base(scheme_name, coef, msk, facet, sampler)
 
@@ -190,15 +186,6 @@ contains
     call this%w_s%init(this%n_nodes)
   end subroutine reichardt_init_from_components
 
-  !> Stop with an error if a device backend is used, since the Reichardt
-  !! wall model is only implemented for the CPU backend.
-  subroutine reichardt_check_backend()
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-       call neko_error("The reichardt wall model is only implemented " // &
-            "for the CPU backend")
-    end if
-  end subroutine reichardt_check_backend
-
   !> Compute the kinematic viscosity vector.
   subroutine reichardt_compute_nu(this)
     class(reichardt_t), intent(inout) :: this
@@ -208,10 +195,17 @@ contains
     call neko_scratch_registry%request_field(temp, idx, .false.)
     call field_invcol3(temp, this%mu, this%rho)
 
-    call masked_gather_copy_0(this%nu%x, temp%x, this%msk, temp%size(), &
-         this%nu%size())
-    call masked_gather_copy_0(this%rho_w%x, this%rho%x, this%msk, &
-         this%rho%size(), this%rho_w%size())
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_masked_gather_copy_0(this%nu%x_d, temp%x_d, this%msk_d, &
+            temp%size(), this%nu%size())
+       call device_masked_gather_copy_0(this%rho_w%x_d, this%rho%x_d, &
+            this%msk_d, this%rho%size(), this%rho_w%size())
+    else
+       call masked_gather_copy_0(this%nu%x, temp%x, this%msk, temp%size(), &
+            this%nu%size())
+       call masked_gather_copy_0(this%rho_w%x, this%rho%x, this%msk, &
+            this%rho%size(), this%rho_w%size())
+    end if
 
     call neko_scratch_registry%relinquish_field(idx)
   end subroutine reichardt_compute_nu
@@ -250,11 +244,20 @@ contains
     call this%sampler%sample(v, this%v_s)
     call this%sampler%sample(w, this%w_s)
 
-    call reichardt_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
-         this%n_x%x, this%n_y%x, this%n_z%x, &
-         this%nu%x, this%rho_w%x, this%sampler%h%x, &
-         this%tau_x%x, this%tau_y%x, this%tau_z%x, &
-         this%n_nodes, this%kappa, tstep)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call reichardt_compute_device(this%u_s%x_d, this%v_s%x_d, &
+            this%w_s%x_d, &
+            this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
+            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, &
+            this%tau_x%x_d, this%tau_y%x_d, this%tau_z%x_d, &
+            this%n_nodes, this%kappa, tstep)
+    else
+       call reichardt_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
+            this%n_x%x, this%n_y%x, this%n_z%x, &
+            this%nu%x, this%rho_w%x, this%sampler%h%x, &
+            this%tau_x%x, this%tau_y%x, this%tau_z%x, &
+            this%n_nodes, this%kappa, tstep)
+    end if
 
     nullify(u, v, w)
 
