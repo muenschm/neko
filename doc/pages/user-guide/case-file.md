@@ -850,7 +850,8 @@ A more detailed description of each boundary condition is provided below.
      sublayer, the buffer layer and the logarithmic region. It requires
      specifying the von Kármán constant `kappa`. The remaining constants of the
      law are fixed to their original values. This model is suitable for smooth
-     walls and is currently only available for the CPU backend.
+     walls. The GPU implementation is partially untested so far, and a
+     warning is printed when the model is used on a device backend.
 
    * The `rough_log_law` model requires specifying `kappa` and `B`, which are
      the log-law constants, and `z0`, which is the characteristic roughness
