@@ -45,7 +45,8 @@ module duprat
   use registry, only : neko_registry
   use json_utils, only : json_get_or_lookup, json_get_or_lookup_or_default, &
        json_get_or_default, json_get_subdict_or_empty
-  use duprat_cpu, only : duprat_compute_cpu
+  use duprat_cpu, only : duprat_compute_cpu, duprat_update_dpds_cpu
+  use operators, only : grad
   use field_math, only : field_invcol3
   use vector, only : vector_t
   use math, only : masked_gather_copy_0
@@ -64,8 +65,9 @@ module duprat
   !! profile is obtained by integrating the simplified thin-boundary-layer
   !! equation across the wall layer.
   !! Reference: https://doi.org/10.1063/1.3529358
-  !! @note Currently only a constant, prescribed pressure gradient is
-  !! supported, and only on the CPU backend.
+  !! The pressure gradient is either prescribed as a constant, or evaluated
+  !! locally from the pressure field and filtered in time.
+  !! @note Currently only implemented for the CPU backend.
   type, public, extends(wall_model_t) :: duprat_t
      !> The von Karman coefficient.
      real(kind=rp) :: kappa = 0.41_rp
@@ -73,17 +75,37 @@ module duprat
      real(kind=rp) :: beta = 0.78_rp
      !> The damping constant of the eddy viscosity.
      real(kind=rp) :: A = 17.0_rp
+     !> Whether the pressure gradient is evaluated locally from the pressure
+     !! field (true) or prescribed as a constant (false).
+     logical :: local_dpds = .false.
      !> The prescribed wall-tangential pressure gradient, positive when
      !! adverse to the local flow direction.
      real(kind=rp) :: dpds_constant = 0.0_rp
+     !> Time constant of the low-pass filter of the local pressure gradient.
+     real(kind=rp) :: filter_time = 0.0_rp
+     !> Time from which the local pressure gradient is taken into account.
+     real(kind=rp) :: start_time = 0.0_rp
+     !> Time of the previous filter update.
+     real(kind=rp) :: t_prev = 0.0_rp
+     !> Time step of the previous filter update, -1 before the first one.
+     integer :: tstep_prev = -1
      !> The kinematic viscosity.
      type(vector_t) :: nu
      !> The fluid density at the boundary.
      type(vector_t) :: rho_w
-     !> The wall-tangential pressure gradient at the wall nodes.
+     !> The wall-tangential pressure gradient at the wall nodes, filtered in
+     !! time in the local mode.
      type(vector_t) :: dpds
+     !> The ratio alpha = u_tau^2 / u_tau_p^2 at the wall nodes.
+     type(vector_t) :: alpha
      !> Velocity sampled away from the wall.
      type(vector_t) :: u_s, v_s, w_s
+     !> Pressure gradient sampled away from the wall (local mode).
+     type(vector_t) :: dpx_s, dpy_s, dpz_s
+     !> Registry field with dp/ds at the wall nodes, for output.
+     type(field_t), pointer :: dpds_field => null()
+     !> Registry field with alpha at the wall nodes, for output.
+     type(field_t), pointer :: alpha_field => null()
    contains
      !> Constructor from JSON.
      procedure, pass(this) :: init => duprat_init
@@ -99,6 +121,8 @@ module duprat
      procedure, pass(this) :: free => duprat_free
      !> Compute the kinematic viscosity at the wall.
      procedure, pass(this) :: compute_nu => duprat_compute_nu
+     !> Update the filtered local pressure gradient.
+     procedure, pass(this) :: update_dpds => duprat_update_dpds
      !> Compute the wall shear stress.
      procedure, pass(this) :: compute => duprat_compute
   end type duprat_t
@@ -117,14 +141,16 @@ contains
     integer, intent(in) :: msk(:)
     integer, intent(in) :: facet(:)
     type(json_file), intent(inout) :: json
-    real(kind=rp) :: kappa, beta, A, dpds_constant
+    real(kind=rp) :: kappa, beta, A, dpds_constant, filter_time, start_time
+    logical :: local_dpds
     class(wall_sampler_t), allocatable :: sampler
 
-    call duprat_read_json(json, kappa, beta, A, dpds_constant)
+    call duprat_read_json(json, kappa, beta, A, local_dpds, dpds_constant, &
+         filter_time, start_time)
 
     call wall_sampler_factory(sampler, json)
     call this%init_from_components(scheme_name, coef, msk, facet, sampler, &
-         kappa, beta, A, dpds_constant)
+         kappa, beta, A, local_dpds, dpds_constant, filter_time, start_time)
   end subroutine duprat_init
 
   !> Constructor from JSON.
@@ -142,7 +168,8 @@ contains
 
     call this%partial_init_base(coef, scheme_name, json)
     call duprat_read_json(json, this%kappa, this%beta, this%A, &
-         this%dpds_constant)
+         this%local_dpds, this%dpds_constant, this%filter_time, &
+         this%start_time)
 
     call neko_log%section('Wall model')
     write(log_buf, '(A)') 'Model : Duprat'
@@ -153,8 +180,17 @@ contains
     call neko_log%message(log_buf)
     write(log_buf, '(A, E15.7)') 'A : ', this%A
     call neko_log%message(log_buf)
-    write(log_buf, '(A, E15.7)') 'dp/ds (constant) : ', this%dpds_constant
-    call neko_log%message(log_buf)
+    if (this%local_dpds) then
+       write(log_buf, '(A)') 'dp/ds : local'
+       call neko_log%message(log_buf)
+       write(log_buf, '(A, E15.7)') 'filter time : ', this%filter_time
+       call neko_log%message(log_buf)
+       write(log_buf, '(A, E15.7)') 'start time : ', this%start_time
+       call neko_log%message(log_buf)
+    else
+       write(log_buf, '(A, E15.7)') 'dp/ds (constant) : ', this%dpds_constant
+       call neko_log%message(log_buf)
+    end if
     call neko_log%end_section()
 
   end subroutine duprat_partial_init
@@ -164,10 +200,16 @@ contains
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term.
   !! @param A The damping constant.
+  !! @param local_dpds Whether the pressure gradient is evaluated locally.
   !! @param dpds_constant The prescribed wall-tangential pressure gradient.
-  subroutine duprat_read_json(json, kappa, beta, A, dpds_constant)
+  !! @param filter_time The time constant of the pressure-gradient filter.
+  !! @param start_time The time from which the local gradient is used.
+  subroutine duprat_read_json(json, kappa, beta, A, local_dpds, &
+       dpds_constant, filter_time, start_time)
     type(json_file), intent(inout) :: json
     real(kind=rp), intent(out) :: kappa, beta, A, dpds_constant
+    real(kind=rp), intent(out) :: filter_time, start_time
+    logical, intent(out) :: local_dpds
     type(json_file) :: pg_json
     character(len=:), allocatable :: pg_type
 
@@ -179,13 +221,26 @@ contains
     ! zero pressure gradient, i.e. in its equilibrium limit.
     call json_get_subdict_or_empty(json, "pressure_gradient", pg_json)
     call json_get_or_default(pg_json, "type", pg_type, "constant")
+    dpds_constant = 0.0_rp
+    filter_time = 0.0_rp
+    start_time = 0.0_rp
     select case (trim(pg_type))
     case ("constant")
+       local_dpds = .false.
        call json_get_or_lookup_or_default(pg_json, "value", dpds_constant, &
             0.0_rp)
+    case ("local")
+       local_dpds = .true.
+       call json_get_or_lookup(pg_json, "filter_time", filter_time)
+       call json_get_or_lookup_or_default(pg_json, "start_time", start_time, &
+            0.0_rp)
+       if (filter_time .lt. 0.0_rp) then
+          call neko_error("The pressure_gradient filter_time of the " // &
+               "duprat wall model must not be negative")
+       end if
     case default
        call neko_error("Unknown pressure_gradient type '" // trim(pg_type) &
-            // "' for the duprat wall model. Supported: constant")
+            // "' for the duprat wall model. Supported: constant, local")
     end select
     call pg_json%destroy()
 
@@ -216,10 +271,17 @@ contains
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term.
   !! @param A The damping constant.
+  !! @param local_dpds Whether the pressure gradient is evaluated locally
+  !! from the pressure field instead of being prescribed.
   !! @param dpds_constant The prescribed wall-tangential pressure gradient,
   !! positive when adverse to the local flow direction.
+  !! @param filter_time The time constant of the low-pass filter of the local
+  !! pressure gradient, 0 for no filtering.
+  !! @param start_time The time from which the local pressure gradient is
+  !! used. Before, the model runs with a zero pressure gradient.
   subroutine duprat_init_from_components(this, scheme_name, coef, msk, &
-       facet, sampler, kappa, beta, A, dpds_constant)
+       facet, sampler, kappa, beta, A, local_dpds, dpds_constant, &
+       filter_time, start_time)
     class(duprat_t), intent(inout) :: this
     character(len=*), intent(in) :: scheme_name
     type(coef_t), intent(in) :: coef
@@ -227,6 +289,8 @@ contains
     integer, intent(in) :: facet(:)
     class(wall_sampler_t), allocatable, intent(inout) :: sampler
     real(kind=rp), intent(in) :: kappa, beta, A, dpds_constant
+    real(kind=rp), intent(in) :: filter_time, start_time
+    logical, intent(in) :: local_dpds
 
     call duprat_check_backend()
 
@@ -236,7 +300,10 @@ contains
     this%kappa = kappa
     this%beta = beta
     this%A = A
+    this%local_dpds = local_dpds
     this%dpds_constant = dpds_constant
+    this%filter_time = filter_time
+    this%start_time = start_time
 
     call duprat_init_vectors(this)
   end subroutine duprat_init_from_components
@@ -248,11 +315,33 @@ contains
     call this%nu%init(this%n_nodes)
     call this%rho_w%init(this%n_nodes)
     call this%dpds%init(this%n_nodes)
-    this%dpds%x = this%dpds_constant
+    call this%alpha%init(this%n_nodes)
     call this%validate_single_sample()
     call this%u_s%init(this%n_nodes)
     call this%v_s%init(this%n_nodes)
     call this%w_s%init(this%n_nodes)
+
+    ! The filtered local gradient starts from zero, so that the pressure
+    ! gradient enters smoothly over about one filter time constant.
+    if (this%local_dpds) then
+       this%dpds%x = 0.0_rp
+       call this%dpx_s%init(this%n_nodes)
+       call this%dpy_s%init(this%n_nodes)
+       call this%dpz_s%init(this%n_nodes)
+    else
+       this%dpds%x = this%dpds_constant
+    end if
+    this%alpha%x = 1.0_rp
+    this%tstep_prev = -1
+
+    ! Fields for output of dp/ds and alpha at the wall, shared by all
+    ! boundaries using this model.
+    call neko_registry%add_field(this%dof, "duprat_dpds", &
+         ignore_existing = .true.)
+    this%dpds_field => neko_registry%get_field("duprat_dpds")
+    call neko_registry%add_field(this%dof, "duprat_alpha", &
+         ignore_existing = .true.)
+    this%alpha_field => neko_registry%get_field("duprat_alpha")
   end subroutine duprat_init_vectors
 
   !> Stop with an error if a device backend is used, since the Duprat
@@ -288,6 +377,12 @@ contains
     call this%nu%free()
     call this%rho_w%free()
     call this%dpds%free()
+    call this%alpha%free()
+    call this%dpx_s%free()
+    call this%dpy_s%free()
+    call this%dpz_s%free()
+    nullify(this%dpds_field)
+    nullify(this%alpha_field)
     call this%u_s%free()
     call this%v_s%free()
     call this%w_s%free()
@@ -305,6 +400,7 @@ contains
     type(field_t), pointer :: u
     type(field_t), pointer :: v
     type(field_t), pointer :: w
+    integer :: i
 
     call this%compute_nu()
 
@@ -316,13 +412,91 @@ contains
     call this%sampler%sample(v, this%v_s)
     call this%sampler%sample(w, this%w_s)
 
+    if (this%local_dpds) call this%update_dpds(t, tstep)
+
     call duprat_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
          this%n_x%x, this%n_y%x, this%n_z%x, &
          this%nu%x, this%rho_w%x, this%sampler%h%x, this%dpds%x, &
-         this%tau_x%x, this%tau_y%x, this%tau_z%x, &
+         this%tau_x%x, this%tau_y%x, this%tau_z%x, this%alpha%x, &
          this%n_nodes, this%kappa, this%beta, this%A, tstep)
+
+    ! Copy dp/ds and alpha to the output fields
+    do i = 1, this%n_nodes
+       this%dpds_field%x(this%msk(i), 1, 1, 1) = this%dpds%x(i)
+       this%alpha_field%x(this%msk(i), 1, 1, 1) = this%alpha%x(i)
+    end do
 
     nullify(u, v, w)
 
   end subroutine duprat_compute
+
+  !> Update the filtered wall-tangential pressure gradient from the current
+  !! pressure field.
+  !!
+  !! The wall model is evaluated at the beginning of a time step, before the
+  !! pressure and velocity solves. The pressure field is therefore the one of
+  !! the latest completed step, i.e. the same time level as the sampled
+  !! velocity. Its gradient is sampled at the same points as the velocity,
+  !! projected on the local flow direction and filtered in time with an
+  !! exponential moving average,
+  !! (dp/ds)_filt^n = (1 - eps) (dp/ds)_filt^(n-1) + eps (dp/ds)^n,
+  !! with eps = 1 - exp(-dt / filter_time); see `duprat_update_dpds_cpu`.
+  !! The update is done once per time step. Before `start_time`, the
+  !! filtered gradient stays zero.
+  !! @param t The time value.
+  !! @param tstep The current time-step.
+  subroutine duprat_update_dpds(this, t, tstep)
+    class(duprat_t), intent(inout) :: this
+    real(kind=rp), intent(in) :: t
+    integer, intent(in) :: tstep
+    type(field_t), pointer :: p, dpdx, dpdy, dpdz
+    real(kind=rp) :: dt, eps
+    integer :: idx(3)
+
+    ! Update once per time step only
+    if (tstep .eq. this%tstep_prev) return
+
+    ! No time increment is known at the first call, so only record the time
+    if (this%tstep_prev .lt. 0) then
+       dt = 0.0_rp
+    else
+       dt = t - this%t_prev
+    end if
+    this%tstep_prev = tstep
+    this%t_prev = t
+
+    if (t .lt. this%start_time .or. dt .le. 0.0_rp) return
+
+    ! Weight of the current gradient in the exponential moving average,
+    ! eps = 1 - exp(-dt / T). This is the exact discrete form of a
+    ! first-order low-pass filter with time constant T, also for variable
+    ! time steps. T = 0 gives eps = 1, i.e. no filtering.
+    if (this%filter_time .gt. 0.0_rp) then
+       eps = 1.0_rp - exp(-dt / this%filter_time)
+    else
+       eps = 1.0_rp
+    end if
+
+    ! Physical pressure gradient, sampled at the velocity sampling points
+    p => neko_registry%get_field("p")
+    call neko_scratch_registry%request_field(dpdx, idx(1), .false.)
+    call neko_scratch_registry%request_field(dpdy, idx(2), .false.)
+    call neko_scratch_registry%request_field(dpdz, idx(3), .false.)
+
+    call grad(dpdx%x, dpdy%x, dpdz%x, p%x, this%coef)
+    call this%sampler%sample(dpdx, this%dpx_s)
+    call this%sampler%sample(dpdy, this%dpy_s)
+    call this%sampler%sample(dpdz, this%dpz_s)
+
+    call neko_scratch_registry%relinquish_field(idx)
+
+    call duprat_update_dpds_cpu(this%dpx_s%x, this%dpy_s%x, this%dpz_s%x, &
+         this%u_s%x, this%v_s%x, this%w_s%x, &
+         this%n_x%x, this%n_y%x, this%n_z%x, &
+         this%nu%x, this%rho_w%x, this%sampler%h%x, eps, this%dpds%x, &
+         this%n_nodes)
+
+    nullify(p, dpdx, dpdy, dpdz)
+
+  end subroutine duprat_update_dpds
 end module duprat

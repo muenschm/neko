@@ -38,7 +38,7 @@ module duprat_cpu
   implicit none
   private
 
-  public :: duprat_compute_cpu, duprat_u_star
+  public :: duprat_compute_cpu, duprat_update_dpds_cpu, duprat_u_star
 
   !> Number of sub-intervals of the composite quadrature for U*.
   integer, parameter :: N_SUB = 12
@@ -70,6 +70,7 @@ contains
   !! @param tau_x The x component of the wall shear stress.
   !! @param tau_y The y component of the wall shear stress.
   !! @param tau_z The z component of the wall shear stress.
+  !! @param alpha The ratio u_tau^2 / u_tau_p^2, output for diagnostics.
   !! @param n_nodes The number of wall nodes.
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term in the eddy
@@ -77,12 +78,13 @@ contains
   !! @param A The damping constant of the eddy viscosity.
   !! @param tstep The current time-step.
   subroutine duprat_compute_cpu(u, v, w, n_x, n_y, n_z, nu, rho_w, h, dpds, &
-       tau_x, tau_y, tau_z, n_nodes, kappa, beta, A, tstep)
+       tau_x, tau_y, tau_z, alpha, n_nodes, kappa, beta, A, tstep)
     integer, intent(in) :: n_nodes, tstep
     real(kind=rp), dimension(n_nodes), intent(in) :: u, v, w
     real(kind=rp), dimension(n_nodes), intent(in) :: rho_w, dpds
     real(kind=rp), dimension(n_nodes), intent(in) :: n_x, n_y, n_z, h, nu
     real(kind=rp), dimension(n_nodes), intent(inout) :: tau_x, tau_y, tau_z
+    real(kind=rp), dimension(n_nodes), intent(inout) :: alpha
     real(kind=rp), intent(in) :: kappa, beta, A
     integer :: i
     real(kind=rp) :: ui, vi, wi, magu, utau, normu, guess, rho, up
@@ -109,6 +111,7 @@ contains
           tau_x(i) = 0.0_rp
           tau_y(i) = 0.0_rp
           tau_z(i) = 0.0_rp
+          alpha(i) = 1.0_rp
           cycle
        end if
 
@@ -131,10 +134,85 @@ contains
        tau_x(i) = -rho*utau**2 * ui / magu
        tau_y(i) = -rho*utau**2 * vi / magu
        tau_z(i) = -rho*utau**2 * wi / magu
+
+       ! alpha = u_tau^2 / u_tau_p^2, 1 without pressure gradient
+       alpha(i) = 1.0_rp
+       if (up .gt. 0.0_rp) alpha(i) = utau**2 / (utau**2 + up**2)
     end do
     !$omp end parallel do
 
   end subroutine duprat_compute_cpu
+
+  !> Update the filtered wall-tangential pressure gradient on cpu.
+  !!
+  !! At each wall node, the sampled pressure gradient is projected on the
+  !! direction of the sampled wall-parallel velocity, which gives the
+  !! streamwise gradient dp/ds of Duprat et al. (2011), positive when adverse
+  !! to the local flow. It is limited to
+  !! \f$ |\partial p / \partial s| \le (\rho / \nu) (u \nu / h)^{3/2} \f$,
+  !! i.e. the pressure velocity u_p may not exceed the friction velocity of
+  !! a laminar (Stokes) profile through the sampled velocity, which guards
+  !! the model against unphysical pressure spikes.
+  !!
+  !! The limited gradient is then filtered in time with an exponential
+  !! moving average, a first-order low-pass filter,
+  !! \f$ (\partial p / \partial s)_{filt}^{n} = (1 - \epsilon)
+  !! (\partial p / \partial s)_{filt}^{n-1} + \epsilon
+  !! (\partial p / \partial s)^{n} \f$,
+  !! where the weight \f$ \epsilon = 1 - e^{-\Delta t / T} \f$ follows from
+  !! the filter time constant T and is exact for variable time steps.
+  !! @param dpx The x component of the sampled pressure gradient.
+  !! @param dpy The y component of the sampled pressure gradient.
+  !! @param dpz The z component of the sampled pressure gradient.
+  !! @param u The x component of the sampled velocity.
+  !! @param v The y component of the sampled velocity.
+  !! @param w The z component of the sampled velocity.
+  !! @param n_x The x component of the wall normal.
+  !! @param n_y The y component of the wall normal.
+  !! @param n_z The z component of the wall normal.
+  !! @param nu The kinematic viscosity at the wall.
+  !! @param rho_w The density at the wall.
+  !! @param h The wall-normal distance of the sampling point.
+  !! @param eps The filter weight of the current gradient, in [0, 1].
+  !! @param dpds The filtered pressure gradient, updated in place.
+  !! @param n_nodes The number of wall nodes.
+  subroutine duprat_update_dpds_cpu(dpx, dpy, dpz, u, v, w, n_x, n_y, n_z, &
+       nu, rho_w, h, eps, dpds, n_nodes)
+    integer, intent(in) :: n_nodes
+    real(kind=rp), dimension(n_nodes), intent(in) :: dpx, dpy, dpz
+    real(kind=rp), dimension(n_nodes), intent(in) :: u, v, w
+    real(kind=rp), dimension(n_nodes), intent(in) :: n_x, n_y, n_z
+    real(kind=rp), dimension(n_nodes), intent(in) :: nu, rho_w, h
+    real(kind=rp), intent(in) :: eps
+    real(kind=rp), dimension(n_nodes), intent(inout) :: dpds
+    integer :: i
+    real(kind=rp) :: ui, vi, wi, normu, magu, dp, dp_max
+
+    !$omp parallel do private(i, ui, vi, wi, normu, magu, dp, dp_max)
+    do i = 1, n_nodes
+       ! Wall-parallel part of the sampled velocity
+       normu = u(i) * n_x(i) + v(i) * n_y(i) + w(i) * n_z(i)
+       ui = u(i) - normu * n_x(i)
+       vi = v(i) - normu * n_y(i)
+       wi = w(i) - normu * n_z(i)
+       magu = sqrt(ui**2 + vi**2 + wi**2)
+
+       ! Without a flow direction, keep the previous filtered value
+       if (magu .le. NEKO_EPS) cycle
+
+       ! Streamwise pressure gradient, positive when adverse
+       dp = (dpx(i) * ui + dpy(i) * vi + dpz(i) * wi) / magu
+
+       ! Limit to the Stokes bound, u_p <= sqrt(u nu / h)
+       dp_max = rho_w(i) / nu(i) * (magu * nu(i) / h(i))**1.5_rp
+       dp = sign(min(abs(dp), dp_max), dp)
+
+       ! Exponential moving average
+       dpds(i) = (1.0_rp - eps) * dpds(i) + eps * dp
+    end do
+    !$omp end parallel do
+
+  end subroutine duprat_update_dpds_cpu
 
   !> Dimensionless velocity U*(y*) of the model of Duprat et al. (2011).
   !! Integrates Eq. (5),
