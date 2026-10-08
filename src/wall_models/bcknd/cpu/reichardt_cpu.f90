@@ -40,13 +40,6 @@ module reichardt_cpu
 
   public :: reichardt_compute_cpu
 
-  !> Damping length scale of the Reichardt law, in wall units.
-  real(kind=rp), parameter :: REICHARDT_A = 11.0_rp
-  !> Decay length scale of the second exponential term, in wall units.
-  real(kind=rp), parameter :: REICHARDT_C = 3.0_rp
-  !> Amplitude of the exponential correction.
-  real(kind=rp), parameter :: REICHARDT_D = 7.8_rp
-
 contains
   !> Compute the wall shear stress on cpu using Reichardt's law.
   !! @param u The x component of the sampled velocity.
@@ -63,16 +56,20 @@ contains
   !! @param tau_z The z component of the wall shear stress.
   !! @param n_nodes The number of wall nodes.
   !! @param kappa The von Karman coefficient.
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term, in
+  !! wall units.
   !! @param tstep The current time-step.
   subroutine reichardt_compute_cpu(u, v, w, &
        n_x, n_y, n_z, nu, rho_w, h, tau_x, tau_y, tau_z, n_nodes, &
-       kappa, tstep)
+       kappa, C, B1, B2, tstep)
     integer, intent(in) :: n_nodes, tstep
     real(kind=rp), dimension(n_nodes), intent(in) :: u, v, w
     real(kind=rp), dimension(n_nodes), intent(in) :: rho_w
     real(kind=rp), dimension(n_nodes), intent(in) :: n_x, n_y, n_z, h, nu
     real(kind=rp), dimension(n_nodes), intent(inout) :: tau_x, tau_y, tau_z
-    real(kind=rp), intent(in) :: kappa
+    real(kind=rp), intent(in) :: kappa, C, B1, B2
     integer :: i
     real(kind=rp) :: ui, vi, wi, magu, utau, normu, guess, rho
 
@@ -109,7 +106,7 @@ contains
           guess = sqrt(sqrt(guess) / rho)
        end if
 
-       utau = solve_cpu(magu, h(i), guess, nu(i), kappa)
+       utau = solve_cpu(magu, h(i), guess, nu(i), kappa, C, B1, B2)
 
        ! Distribute according to the velocity vector
        tau_x(i) = -rho*utau**2 * ui / magu
@@ -123,25 +120,29 @@ contains
   !> Evaluate Reichardt's law of the wall, u+ as a function of y+.
   !! @param yp The wall-normal distance in wall units.
   !! @param kappa The von Karman coefficient.
-  pure function reichardt_up(yp, kappa) result(up)
-    real(kind=rp), intent(in) :: yp, kappa
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term.
+  pure function reichardt_up(yp, kappa, C, B1, B2) result(up)
+    real(kind=rp), intent(in) :: yp, kappa, C, B1, B2
     real(kind=rp) :: up
 
-    up = log(1.0_rp + kappa*yp) / kappa + REICHARDT_D * &
-         (1.0_rp - exp(-yp/REICHARDT_A) - &
-         yp/REICHARDT_A * exp(-yp/REICHARDT_C))
+    up = log(1.0_rp + kappa*yp) / kappa + C * &
+         (1.0_rp - exp(-yp/B1) - yp/B1 * exp(-yp/B2))
   end function reichardt_up
 
   !> Evaluate the derivative du+/dy+ of Reichardt's law of the wall.
   !! @param yp The wall-normal distance in wall units.
   !! @param kappa The von Karman coefficient.
-  pure function reichardt_dup(yp, kappa) result(dup)
-    real(kind=rp), intent(in) :: yp, kappa
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term.
+  pure function reichardt_dup(yp, kappa, C, B1, B2) result(dup)
+    real(kind=rp), intent(in) :: yp, kappa, C, B1, B2
     real(kind=rp) :: dup
 
-    dup = 1.0_rp / (1.0_rp + kappa*yp) + REICHARDT_D / REICHARDT_A * &
-         (exp(-yp/REICHARDT_A) - &
-         (1.0_rp - yp/REICHARDT_C) * exp(-yp/REICHARDT_C))
+    dup = 1.0_rp / (1.0_rp + kappa*yp) + C / B1 * &
+         (exp(-yp/B1) - (1.0_rp - yp/B2) * exp(-yp/B2))
   end function reichardt_dup
 
   !> Newton solver for the algebraic equation defined by the law on cpu.
@@ -151,11 +152,14 @@ contains
   !! @param guess Initial guess.
   !! @param nu The molecular kinematic viscosity.
   !! @param kappa The von Karman constant.
-  function solve_cpu(u, y, guess, nu, kappa) result(utau)
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term.
+  function solve_cpu(u, y, guess, nu, kappa, C, B1, B2) result(utau)
     real(kind=rp), intent(in) :: u
     real(kind=rp), intent(in) :: y
     real(kind=rp), intent(in) :: guess
-    real(kind=rp), intent(in) :: nu, kappa
+    real(kind=rp), intent(in) :: nu, kappa, C, B1, B2
     real(kind=rp) :: yp, up, utau
     real(kind=rp) :: error, f, df, old, tol
     integer :: k, maxiter
@@ -172,11 +176,11 @@ contains
     do k = 1, maxiter
        old = utau
        yp = y * utau / nu
-       up = reichardt_up(yp, kappa)
+       up = reichardt_up(yp, kappa, C, B1, B2)
 
        ! Evaluate function and its derivative
        f = utau * up - u
-       df = up + yp * reichardt_dup(yp, kappa)
+       df = up + yp * reichardt_dup(yp, kappa, C, B1, B2)
 
        ! Update solution, keeping utau positive
        utau = utau - f / df

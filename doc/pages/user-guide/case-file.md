@@ -847,10 +847,12 @@ A more detailed description of each boundary condition is provided below.
 
    * The `reichardt` model uses the law of the wall of Reichardt (DOI:
      `10.1002/zamm.19510310704`), which continuously covers the viscous
-     sublayer, the buffer layer and the logarithmic region. It requires
-     specifying the von Kármán constant `kappa`. The remaining constants of the
-     law are fixed to their original values. This model is suitable for smooth
-     walls. The GPU implementation is partially untested so far, and a
+     sublayer, the buffer layer and the logarithmic region,
+     \f$ u^+ = \frac{1}{\kappa} \ln(1 + \kappa y^+) + C \left[1 -
+     e^{-y^+/B_1} - \frac{y^+}{B_1} e^{-y^+/B_2} \right] \f$.
+     It requires specifying the von Kármán constant `kappa`, and accepts the
+     optional constants `C`, `B1` and `B2`, which default to the original
+     values `7.8`, `11` and `3`. This model is suitable for smooth walls. The GPU implementation is partially untested so far, and a
      warning is printed when the model is used on a device backend.
 
    * The `rough_log_law` model requires specifying `kappa` and `B`, which are

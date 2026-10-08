@@ -38,30 +38,34 @@
  * Reichardt's law of the wall, u+ as a function of y+.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
-inline real reichardt_up(const real yp, const real kappa) {
+inline real reichardt_up(const real yp, const real kappa,
+                         const real C, const real B1,
+                         const real B2) {
   const real one = (real) 1.0;
-  const real A = (real) 11.0;
-  const real C = (real) 3.0;
-  const real D = (real) 7.8;
 
   return log(one + kappa * yp) / kappa +
-    D * (one - exp(-yp / A) - yp / A * exp(-yp / C));
+    C * (one - exp(-yp / B1) - yp / B1 * exp(-yp / B2));
 }
 
 /**
  * Derivative du+/dy+ of Reichardt's law of the wall.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
-inline real reichardt_dup(const real yp, const real kappa) {
+inline real reichardt_dup(const real yp, const real kappa,
+                          const real C, const real B1,
+                          const real B2) {
   const real one = (real) 1.0;
-  const real A = (real) 11.0;
-  const real C = (real) 3.0;
-  const real D = (real) 7.8;
 
   return one / (one + kappa * yp) +
-    D / A * (exp(-yp / A) - (one - yp / C) * exp(-yp / C));
+    C / B1 * (exp(-yp / B1) - (one - yp / B2) * exp(-yp / B2));
 }
 
 /**
@@ -71,22 +75,27 @@ inline real reichardt_dup(const real yp, const real kappa) {
  * @param guess Initial guess.
  * @param nu The kinematic viscosity.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tol The relative convergence tolerance.
  */
 inline real reichardt_solve(const real u, const real y,
                             const real guess, const real nu,
-                            const real kappa, const real tol) {
+                            const real kappa, const real C,
+                            const real B1, const real B2,
+                            const real tol) {
   real utau = guess;
   const int maxiter = 100;
 
   for (int k = 0; k < maxiter; ++k) {
     const real old = utau;
     const real yp = y * utau / nu;
-    const real up = reichardt_up(yp, kappa);
+    const real up = reichardt_up(yp, kappa, C, B1, B2);
 
     /* Evaluate function and its derivative */
     const real f = utau * up - u;
-    const real df = up + yp * reichardt_dup(yp, kappa);
+    const real df = up + yp * reichardt_dup(yp, kappa, C, B1, B2);
 
     /* Update solution, keeping utau positive */
     utau -= f / df;
@@ -118,6 +127,9 @@ inline real reichardt_solve(const real u, const real y,
  * @param tau_z_d The z-component of the wall shear stress.
  * @param n_nodes The number of wall points.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tstep The current time-step.
  */
 __kernel void reichardt_compute_kernel(
@@ -135,6 +147,9 @@ __kernel void reichardt_compute_kernel(
     __global real * __restrict__ tau_z_d,
     const int n_nodes,
     const real kappa,
+    const real C,
+    const real B1,
+    const real B2,
     const int tstep) {
   const int idx = get_global_id(0);
   const int str = get_global_size(0);
@@ -180,7 +195,8 @@ __kernel void reichardt_compute_kernel(
       guess = sqrt(sqrt(guess) / rho);
     }
 
-    const real utau = reichardt_solve(magu, h, guess, nu, kappa, tol);
+    const real utau = reichardt_solve(magu, h, guess, nu, kappa, C, B1, B2,
+                                   tol);
 
     /* Distribute according to the velocity vector */
     tau_x_d[i] = -rho * utau * utau * ui / magu;

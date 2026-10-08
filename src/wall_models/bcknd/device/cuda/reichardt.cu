@@ -54,13 +54,17 @@ extern "C" {
    * @param tau_z_d The z-component of the wall shear stress.
    * @param n_nodes The number of wall points.
    * @param kappa The von Karman coefficient.
+   * @param C The amplitude of the exponential correction.
+   * @param B1 The damping length scale, in wall units.
+   * @param B2 The decay length scale of the second exponential term.
    * @param tstep The current time-step.
    */
   void cuda_reichardt_compute(void *u_d, void *v_d, void *w_d,
                               void *n_x_d, void *n_y_d, void *n_z_d,
                               void *nu_d, void *rho_w_d, void *h_d,
                               void *tau_x_d, void *tau_y_d, void *tau_z_d,
-                              int *n_nodes, real *kappa, int *tstep) {
+                              int *n_nodes, real *kappa, real *C, real *B1,
+                              real *B2, int *tstep) {
     const dim3 nthrds(256, 1, 1);
     const dim3 nblcks(((*n_nodes) + 256 - 1) / 256, 1, 1);
     const cudaStream_t stream = (cudaStream_t) glb_cmd_queue;
@@ -74,7 +78,7 @@ extern "C" {
                                         (real *) rho_w_d, (real *) h_d,
                                         (real *) tau_x_d, (real *) tau_y_d,
                                         (real *) tau_z_d, *n_nodes, *kappa,
-                                        *tstep);
+                                        *C, *B1, *B2, *tstep);
       CUDA_CHECK(cudaGetLastError());
     }
   }

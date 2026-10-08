@@ -45,30 +45,34 @@ using namespace metal;
  * Reichardt's law of the wall, u+ as a function of y+.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
-static float reichardt_up(const float yp, const float kappa) {
+static float reichardt_up(const float yp, const float kappa,
+                          const float C, const float B1,
+                          const float B2) {
   const float one = 1.0f;
-  const float A = 11.0f;
-  const float C = 3.0f;
-  const float D = 7.8f;
 
   return log(one + kappa * yp) / kappa +
-    D * (one - exp(-yp / A) - yp / A * exp(-yp / C));
+    C * (one - exp(-yp / B1) - yp / B1 * exp(-yp / B2));
 }
 
 /**
  * Derivative du+/dy+ of Reichardt's law of the wall.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
-static float reichardt_dup(const float yp, const float kappa) {
+static float reichardt_dup(const float yp, const float kappa,
+                           const float C, const float B1,
+                           const float B2) {
   const float one = 1.0f;
-  const float A = 11.0f;
-  const float C = 3.0f;
-  const float D = 7.8f;
 
   return one / (one + kappa * yp) +
-    D / A * (exp(-yp / A) - (one - yp / C) * exp(-yp / C));
+    C / B1 * (exp(-yp / B1) - (one - yp / B2) * exp(-yp / B2));
 }
 
 /**
@@ -78,22 +82,27 @@ static float reichardt_dup(const float yp, const float kappa) {
  * @param guess Initial guess.
  * @param nu The kinematic viscosity.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tol The relative convergence tolerance.
  */
 static float reichardt_solve(const float u, const float y,
                              const float guess, const float nu,
-                             const float kappa, const float tol) {
+                             const float kappa, const float C,
+                             const float B1, const float B2,
+                             const float tol) {
   float utau = guess;
   const int maxiter = 100;
 
   for (int k = 0; k < maxiter; ++k) {
     const float old = utau;
     const float yp = y * utau / nu;
-    const float up = reichardt_up(yp, kappa);
+    const float up = reichardt_up(yp, kappa, C, B1, B2);
 
     /* Evaluate function and its derivative */
     const float f = utau * up - u;
-    const float df = up + yp * reichardt_dup(yp, kappa);
+    const float df = up + yp * reichardt_dup(yp, kappa, C, B1, B2);
 
     /* Update solution, keeping utau positive */
     utau -= f / df;
@@ -125,6 +134,9 @@ static float reichardt_solve(const float u, const float y,
  * @param tau_z_d The z-component of the wall shear stress.
  * @param n_nodes The number of wall points.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tstep The current time-step.
  */
 kernel void reichardt_compute_kernel(device const float *u_d [[ buffer(0) ]],
@@ -141,7 +153,10 @@ kernel void reichardt_compute_kernel(device const float *u_d [[ buffer(0) ]],
                                      device float *tau_z_d [[ buffer(11) ]],
                                      constant int &n_nodes [[ buffer(12) ]],
                                      constant float &kappa [[ buffer(13) ]],
-                                     constant int &tstep [[ buffer(14) ]],
+                                     constant float &C [[ buffer(14) ]],
+                                     constant float &B1 [[ buffer(15) ]],
+                                     constant float &B2 [[ buffer(16) ]],
+                                     constant int &tstep [[ buffer(17) ]],
                                      uint idx [[ thread_position_in_grid ]]) {
   if (idx >= (uint) n_nodes) return;
 
@@ -185,7 +200,8 @@ kernel void reichardt_compute_kernel(device const float *u_d [[ buffer(0) ]],
     guess = sqrt(sqrt(guess) / rho);
   }
 
-  const float utau = reichardt_solve(magu, h, guess, nu, kappa, tol);
+  const float utau = reichardt_solve(magu, h, guess, nu, kappa, C, B1, B2,
+                                   tol);
 
   /* Distribute according to the velocity vector */
   tau_x_d[i] = -rho * utau * utau * ui / magu;

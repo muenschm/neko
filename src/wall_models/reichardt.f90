@@ -43,7 +43,7 @@ module reichardt
   use wall_sampler_fctry, only : wall_sampler_factory
   use user_intf, only : user_t
   use registry, only : neko_registry
-  use json_utils, only : json_get_or_lookup
+  use json_utils, only : json_get_or_lookup, json_get_or_lookup_or_default
   use reichardt_cpu, only : reichardt_compute_cpu
   use reichardt_device, only : reichardt_compute_device
   use field_math, only : field_invcol3
@@ -59,13 +59,21 @@ module reichardt
   private
 
   !> Wall model based on Reichardt's law of the wall,
-  !! \f$ u^+ = \frac{1}{\kappa} \ln(1 + \kappa y^+) + 7.8 \left[1 -
-  !! e^{-y^+/11} - \frac{y^+}{11} e^{-y^+/3} \right] \f$.
+  !! \f$ u^+ = \frac{1}{\kappa} \ln(1 + \kappa y^+) + C \left[1 -
+  !! e^{-y^+/B_1} - \frac{y^+}{B_1} e^{-y^+/B_2} \right] \f$,
+  !! with the original constants \f$ C = 7.8 \f$, \f$ B_1 = 11 \f$ and
+  !! \f$ B_2 = 3 \f$ as defaults.
   !! Reference: https://doi.org/10.1002/zamm.19510310704
   !! @note The device kernels have not yet been validated on GPU hardware.
   type, public, extends(wall_model_t) :: reichardt_t
      !> The von Karman coefficient.
      real(kind=rp) :: kappa = 0.41_rp
+     !> The amplitude of the exponential correction.
+     real(kind=rp) :: C = 7.8_rp
+     !> The damping length scale, in wall units.
+     real(kind=rp) :: B1 = 11.0_rp
+     !> The decay length scale of the second exponential term, in wall units.
+     real(kind=rp) :: B2 = 3.0_rp
      !> The kinematic viscosity.
      type(vector_t) :: nu
      !> The fluid density at the boundary.
@@ -105,14 +113,17 @@ contains
     integer, intent(in) :: msk(:)
     integer, intent(in) :: facet(:)
     type(json_file), intent(inout) :: json
-    real(kind=rp) :: kappa
+    real(kind=rp) :: kappa, C, B1, B2
     class(wall_sampler_t), allocatable :: sampler
 
     call json_get_or_lookup(json, "kappa", kappa)
+    call json_get_or_lookup_or_default(json, "C", C, 7.8_rp)
+    call json_get_or_lookup_or_default(json, "B1", B1, 11.0_rp)
+    call json_get_or_lookup_or_default(json, "B2", B2, 3.0_rp)
 
     call wall_sampler_factory(sampler, json)
     call this%init_from_components(scheme_name, coef, msk, facet, sampler, &
-         kappa)
+         kappa, C, B1, B2)
   end subroutine reichardt_init
 
   !> Constructor from JSON.
@@ -130,11 +141,20 @@ contains
 
     call this%partial_init_base(coef, scheme_name, json)
     call json_get_or_lookup(json, "kappa", this%kappa)
+    call json_get_or_lookup_or_default(json, "C", this%C, 7.8_rp)
+    call json_get_or_lookup_or_default(json, "B1", this%B1, 11.0_rp)
+    call json_get_or_lookup_or_default(json, "B2", this%B2, 3.0_rp)
 
     call neko_log%section('Wall model')
     write(log_buf, '(A)') 'Model : Reichardt'
     call neko_log%message(log_buf)
     write(log_buf, '(A, E15.7)') 'kappa : ', this%kappa
+    call neko_log%message(log_buf)
+    write(log_buf, '(A, E15.7)') 'C : ', this%C
+    call neko_log%message(log_buf)
+    write(log_buf, '(A, E15.7)') 'B1 : ', this%B1
+    call neko_log%message(log_buf)
+    write(log_buf, '(A, E15.7)') 'B2 : ', this%B2
     call neko_log%message(log_buf)
     call neko_log%end_section()
 
@@ -168,15 +188,19 @@ contains
   !! @param facet The boundary facets.
   !! @param sampler The sampling strategy. Ownership is transferred.
   !! @param kappa The von Karman coefficient.
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term, in
+  !! wall units.
   subroutine reichardt_init_from_components(this, scheme_name, coef, msk, &
-       facet, sampler, kappa)
+       facet, sampler, kappa, C, B1, B2)
     class(reichardt_t), intent(inout) :: this
     character(len=*), intent(in) :: scheme_name
     type(coef_t), intent(in) :: coef
     integer, intent(in) :: msk(:)
     integer, intent(in) :: facet(:)
     class(wall_sampler_t), allocatable, intent(inout) :: sampler
-    real(kind=rp), intent(in) :: kappa
+    real(kind=rp), intent(in) :: kappa, C, B1, B2
 
     call reichardt_device_warning()
 
@@ -184,6 +208,9 @@ contains
     call this%init_base(scheme_name, coef, msk, facet, sampler)
 
     this%kappa = kappa
+    this%C = C
+    this%B1 = B1
+    this%B2 = B2
 
     call this%nu%init(this%n_nodes)
     call this%rho_w%init(this%n_nodes)
@@ -265,13 +292,13 @@ contains
             this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
             this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, &
             this%tau_x%x_d, this%tau_y%x_d, this%tau_z%x_d, &
-            this%n_nodes, this%kappa, tstep)
+            this%n_nodes, this%kappa, this%C, this%B1, this%B2, tstep)
     else
        call reichardt_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
             this%n_x%x, this%n_y%x, this%n_z%x, &
             this%nu%x, this%rho_w%x, this%sampler%h%x, &
             this%tau_x%x, this%tau_y%x, this%tau_z%x, &
-            this%n_nodes, this%kappa, tstep)
+            this%n_nodes, this%kappa, this%C, this%B1, this%B2, tstep)
     end if
 
     nullify(u, v, w)

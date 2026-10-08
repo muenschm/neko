@@ -598,6 +598,15 @@
                 },
                 "kappa": {
                   "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "C": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "B1": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "B2": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
                 }
               },
               "additionalProperties": true

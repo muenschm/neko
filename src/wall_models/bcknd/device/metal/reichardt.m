@@ -60,17 +60,24 @@
  * @param tau_z_d The z-component of the wall shear stress.
  * @param n_nodes The number of wall points.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tstep The current time-step.
  */
 void metal_reichardt_compute(void *u_d, void *v_d, void *w_d,
                              void *n_x_d, void *n_y_d, void *n_z_d,
                              void *nu_d, void *rho_w_d, void *h_d,
                              void *tau_x_d, void *tau_y_d, void *tau_z_d,
-                             int *n_nodes, real *kappa, int *tstep) {
+                             int *n_nodes, real *kappa, real *C, real *B1,
+                             real *B2, int *tstep) {
   if (*n_nodes < 1) return;
 
   const int n_r = *n_nodes;
   const real kappa_r = *kappa;
+  const real C_r = *C;
+  const real B1_r = *B1;
+  const real B2_r = *B2;
   const int tstep_r = *tstep;
 
   neko_metal_dispatch_1d(neko_metal_pipeline(@"reichardt_compute_kernel"),
@@ -89,6 +96,9 @@ void metal_reichardt_compute(void *u_d, void *v_d, void *w_d,
       [enc setBuffer:(__bridge id<MTLBuffer>) tau_z_d offset:0 atIndex:11];
       [enc setBytes:&n_r length:sizeof(int) atIndex:12];
       [enc setBytes:&kappa_r length:sizeof(real) atIndex:13];
-      [enc setBytes:&tstep_r length:sizeof(int) atIndex:14];
+      [enc setBytes:&C_r length:sizeof(real) atIndex:14];
+      [enc setBytes:&B1_r length:sizeof(real) atIndex:15];
+      [enc setBytes:&B2_r length:sizeof(real) atIndex:16];
+      [enc setBytes:&tstep_r length:sizeof(int) atIndex:17];
     }, (NSUInteger) n_r);
 }
