@@ -160,6 +160,9 @@ extern void *spalding_program;
 /** Device Reichardt wall model kernels */
 extern void *reichardt_program;
 
+/** Device Duprat wall model kernels */
+extern void *duprat_program;
+
 /** Device Richardson wall model kernels */
 extern void *richardson_program;
 

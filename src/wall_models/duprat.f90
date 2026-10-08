@@ -46,13 +46,17 @@ module duprat
   use json_utils, only : json_get_or_lookup, json_get_or_lookup_or_default, &
        json_get_or_default, json_get_subdict_or_empty
   use duprat_cpu, only : duprat_compute_cpu, duprat_update_dpds_cpu
+  use duprat_device, only : duprat_compute_device, duprat_update_dpds_device
   use operators, only : grad
   use field_math, only : field_invcol3
   use vector, only : vector_t
-  use math, only : masked_gather_copy_0
+  use math, only : masked_gather_copy_0, cfill
+  use device_math, only : device_masked_gather_copy_0, &
+       device_masked_scatter_copy_0, device_cfill
   use scratch_registry, only : neko_scratch_registry
   use logger, only : LOG_SIZE, neko_log
-  use utils, only : neko_error
+  use utils, only : neko_error, neko_warning
+  use comm, only : pe_rank
 
   implicit none
   private
@@ -67,7 +71,7 @@ module duprat
   !! Reference: https://doi.org/10.1063/1.3529358
   !! The pressure gradient is either prescribed as a constant, or evaluated
   !! locally from the pressure field and filtered in time.
-  !! @note Currently only implemented for the CPU backend.
+  !! @note The device kernels have not yet been validated on GPU hardware.
   type, public, extends(wall_model_t) :: duprat_t
      !> The von Karman coefficient.
      real(kind=rp) :: kappa = 0.41_rp
@@ -164,7 +168,7 @@ contains
     type(json_file), intent(inout) :: json
     character(len=LOG_SIZE) :: log_buf
 
-    call duprat_check_backend()
+    call duprat_device_warning()
 
     call this%partial_init_base(coef, scheme_name, json)
     call duprat_read_json(json, this%kappa, this%beta, this%A, &
@@ -292,7 +296,7 @@ contains
     real(kind=rp), intent(in) :: filter_time, start_time
     logical, intent(in) :: local_dpds
 
-    call duprat_check_backend()
+    call duprat_device_warning()
 
     call this%free()
     call this%init_base(scheme_name, coef, msk, facet, sampler)
@@ -324,14 +328,14 @@ contains
     ! The filtered local gradient starts from zero, so that the pressure
     ! gradient enters smoothly over about one filter time constant.
     if (this%local_dpds) then
-       this%dpds%x = 0.0_rp
+       call duprat_fill(this%dpds, 0.0_rp)
        call this%dpx_s%init(this%n_nodes)
        call this%dpy_s%init(this%n_nodes)
        call this%dpz_s%init(this%n_nodes)
     else
-       this%dpds%x = this%dpds_constant
+       call duprat_fill(this%dpds, this%dpds_constant)
     end if
-    this%alpha%x = 1.0_rp
+    call duprat_fill(this%alpha, 1.0_rp)
     this%tstep_prev = -1
 
     ! Fields for output of dp/ds and alpha at the wall, shared by all
@@ -344,14 +348,28 @@ contains
     this%alpha_field => neko_registry%get_field("duprat_alpha")
   end subroutine duprat_init_vectors
 
-  !> Stop with an error if a device backend is used, since the Duprat
-  !! wall model is so far only implemented for the CPU backend.
-  subroutine duprat_check_backend()
+  !> Fill a vector on the wall nodes with a constant, on host or device.
+  !! @param vec The vector.
+  !! @param val The value.
+  subroutine duprat_fill(vec, val)
+    type(vector_t), intent(inout) :: vec
+    real(kind=rp), intent(in) :: val
+
+    if (vec%size() .lt. 1) return
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call neko_error("The duprat wall model is only implemented " // &
-            "for the CPU backend")
+       call device_cfill(vec%x_d, val, vec%size())
+    else
+       call cfill(vec%x, val, vec%size())
     end if
-  end subroutine duprat_check_backend
+  end subroutine duprat_fill
+
+  !> Warn that the device kernels are not yet validated on GPU hardware.
+  subroutine duprat_device_warning()
+    if (NEKO_BCKND_DEVICE .eq. 1 .and. pe_rank .eq. 0) then
+       call neko_warning("The duprat wall model GPU implementation " // &
+            "is partially untested so far")
+    end if
+  end subroutine duprat_device_warning
 
   !> Compute the kinematic viscosity vector.
   subroutine duprat_compute_nu(this)
@@ -362,10 +380,17 @@ contains
     call neko_scratch_registry%request_field(temp, idx, .false.)
     call field_invcol3(temp, this%mu, this%rho)
 
-    call masked_gather_copy_0(this%nu%x, temp%x, this%msk, temp%size(), &
-         this%nu%size())
-    call masked_gather_copy_0(this%rho_w%x, this%rho%x, this%msk, &
-         this%rho%size(), this%rho_w%size())
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_masked_gather_copy_0(this%nu%x_d, temp%x_d, this%msk_d, &
+            temp%size(), this%nu%size())
+       call device_masked_gather_copy_0(this%rho_w%x_d, this%rho%x_d, &
+            this%msk_d, this%rho%size(), this%rho_w%size())
+    else
+       call masked_gather_copy_0(this%nu%x, temp%x, this%msk, temp%size(), &
+            this%nu%size())
+       call masked_gather_copy_0(this%rho_w%x, this%rho%x, this%msk, &
+            this%rho%size(), this%rho_w%size())
+    end if
 
     call neko_scratch_registry%relinquish_field(idx)
   end subroutine duprat_compute_nu
@@ -414,17 +439,32 @@ contains
 
     if (this%local_dpds) call this%update_dpds(t, tstep)
 
-    call duprat_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
-         this%n_x%x, this%n_y%x, this%n_z%x, &
-         this%nu%x, this%rho_w%x, this%sampler%h%x, this%dpds%x, &
-         this%tau_x%x, this%tau_y%x, this%tau_z%x, this%alpha%x, &
-         this%n_nodes, this%kappa, this%beta, this%A, tstep)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call duprat_compute_device(this%u_s%x_d, this%v_s%x_d, this%w_s%x_d, &
+            this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
+            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, this%dpds%x_d, &
+            this%tau_x%x_d, this%tau_y%x_d, this%tau_z%x_d, this%alpha%x_d, &
+            this%n_nodes, this%kappa, this%beta, this%A, tstep)
 
-    ! Copy dp/ds and alpha to the output fields
-    do i = 1, this%n_nodes
-       this%dpds_field%x(this%msk(i), 1, 1, 1) = this%dpds%x(i)
-       this%alpha_field%x(this%msk(i), 1, 1, 1) = this%alpha%x(i)
-    end do
+       ! Copy dp/ds and alpha to the output fields
+       call device_masked_scatter_copy_0(this%dpds_field%x_d, &
+            this%dpds%x_d, this%msk_d, this%dpds_field%size(), this%n_nodes)
+       call device_masked_scatter_copy_0(this%alpha_field%x_d, &
+            this%alpha%x_d, this%msk_d, this%alpha_field%size(), &
+            this%n_nodes)
+    else
+       call duprat_compute_cpu(this%u_s%x, this%v_s%x, this%w_s%x, &
+            this%n_x%x, this%n_y%x, this%n_z%x, &
+            this%nu%x, this%rho_w%x, this%sampler%h%x, this%dpds%x, &
+            this%tau_x%x, this%tau_y%x, this%tau_z%x, this%alpha%x, &
+            this%n_nodes, this%kappa, this%beta, this%A, tstep)
+
+       ! Copy dp/ds and alpha to the output fields
+       do i = 1, this%n_nodes
+          this%dpds_field%x(this%msk(i), 1, 1, 1) = this%dpds%x(i)
+          this%alpha_field%x(this%msk(i), 1, 1, 1) = this%alpha%x(i)
+       end do
+    end if
 
     nullify(u, v, w)
 
@@ -483,18 +523,30 @@ contains
     call neko_scratch_registry%request_field(dpdy, idx(2), .false.)
     call neko_scratch_registry%request_field(dpdz, idx(3), .false.)
 
-    call grad(dpdx%x, dpdy%x, dpdz%x, p%x, this%coef)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call grad(dpdx%x_d, dpdy%x_d, dpdz%x_d, p%x_d, this%coef)
+    else
+       call grad(dpdx%x, dpdy%x, dpdz%x, p%x, this%coef)
+    end if
     call this%sampler%sample(dpdx, this%dpx_s)
     call this%sampler%sample(dpdy, this%dpy_s)
     call this%sampler%sample(dpdz, this%dpz_s)
 
     call neko_scratch_registry%relinquish_field(idx)
 
-    call duprat_update_dpds_cpu(this%dpx_s%x, this%dpy_s%x, this%dpz_s%x, &
-         this%u_s%x, this%v_s%x, this%w_s%x, &
-         this%n_x%x, this%n_y%x, this%n_z%x, &
-         this%nu%x, this%rho_w%x, this%sampler%h%x, eps, this%dpds%x, &
-         this%n_nodes)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call duprat_update_dpds_device(this%dpx_s%x_d, this%dpy_s%x_d, &
+            this%dpz_s%x_d, this%u_s%x_d, this%v_s%x_d, this%w_s%x_d, &
+            this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
+            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, eps, &
+            this%dpds%x_d, this%n_nodes)
+    else
+       call duprat_update_dpds_cpu(this%dpx_s%x, this%dpy_s%x, &
+            this%dpz_s%x, this%u_s%x, this%v_s%x, this%w_s%x, &
+            this%n_x%x, this%n_y%x, this%n_z%x, &
+            this%nu%x, this%rho_w%x, this%sampler%h%x, eps, this%dpds%x, &
+            this%n_nodes)
+    end if
 
     nullify(p, dpdx, dpdy, dpdz)
 
