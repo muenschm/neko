@@ -43,14 +43,14 @@ module reichardt_device
      subroutine hip_reichardt_compute(u_d, v_d, w_d, &
           n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
           tau_x_d, tau_y_d, tau_z_d, n_nodes, &
-          kappa, tstep) &
+          kappa, C, B1, B2, tstep) &
           bind(c, name = 'hip_reichardt_compute')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
        use num_types, only : c_rp
        implicit none
        type(c_ptr), value :: u_d, v_d, w_d, rho_w_d
        type(c_ptr), value :: n_x_d, n_y_d, n_z_d, h_d, nu_d
-       real(c_rp) :: kappa
+       real(c_rp) :: kappa, C, B1, B2
        type(c_ptr), value :: tau_x_d, tau_y_d, tau_z_d
        integer(c_int) :: n_nodes, tstep
      end subroutine hip_reichardt_compute
@@ -60,14 +60,14 @@ module reichardt_device
      subroutine cuda_reichardt_compute(u_d, v_d, w_d, &
           n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
           tau_x_d, tau_y_d, tau_z_d, n_nodes, &
-          kappa, tstep) &
+          kappa, C, B1, B2, tstep) &
           bind(c, name = 'cuda_reichardt_compute')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
        use num_types, only : c_rp
        implicit none
        type(c_ptr), value :: u_d, v_d, w_d, rho_w_d
        type(c_ptr), value :: n_x_d, n_y_d, n_z_d, h_d, nu_d
-       real(c_rp) :: kappa
+       real(c_rp) :: kappa, C, B1, B2
        type(c_ptr), value :: tau_x_d, tau_y_d, tau_z_d
        integer(c_int) :: n_nodes, tstep
      end subroutine cuda_reichardt_compute
@@ -77,14 +77,14 @@ module reichardt_device
      subroutine opencl_reichardt_compute(u_d, v_d, w_d, &
           n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
           tau_x_d, tau_y_d, tau_z_d, n_nodes, &
-          kappa, tstep) &
+          kappa, C, B1, B2, tstep) &
           bind(c, name = 'opencl_reichardt_compute')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
        use num_types, only : c_rp
        implicit none
        type(c_ptr), value :: u_d, v_d, w_d, rho_w_d
        type(c_ptr), value :: n_x_d, n_y_d, n_z_d, h_d, nu_d
-       real(c_rp) :: kappa
+       real(c_rp) :: kappa, C, B1, B2
        type(c_ptr), value :: tau_x_d, tau_y_d, tau_z_d
        integer(c_int) :: n_nodes, tstep
      end subroutine opencl_reichardt_compute
@@ -94,14 +94,14 @@ module reichardt_device
      subroutine metal_reichardt_compute(u_d, v_d, w_d, &
           n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
           tau_x_d, tau_y_d, tau_z_d, n_nodes, &
-          kappa, tstep) &
+          kappa, C, B1, B2, tstep) &
           bind(c, name = 'metal_reichardt_compute')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
        use num_types, only : c_rp
        implicit none
        type(c_ptr), value :: u_d, v_d, w_d, rho_w_d
        type(c_ptr), value :: n_x_d, n_y_d, n_z_d, h_d, nu_d
-       real(c_rp) :: kappa
+       real(c_rp) :: kappa, C, B1, B2
        type(c_ptr), value :: tau_x_d, tau_y_d, tau_z_d
        integer(c_int) :: n_nodes, tstep
      end subroutine metal_reichardt_compute
@@ -125,32 +125,40 @@ contains
   !! @param tau_z_d The z component of the wall shear stress.
   !! @param n_nodes The number of wall nodes.
   !! @param kappa The von Karman coefficient.
+  !! @param C The amplitude of the exponential correction.
+  !! @param B1 The damping length scale, in wall units.
+  !! @param B2 The decay length scale of the second exponential term, in
+  !! wall units.
   !! @param tstep The current time-step.
   subroutine reichardt_compute_device(u_d, v_d, w_d, &
        n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, tau_x_d, tau_y_d, tau_z_d, &
-       n_nodes, kappa, tstep)
+       n_nodes, kappa, C, B1, B2, tstep)
     integer, intent(in) :: n_nodes, tstep
     type(c_ptr), intent(in) :: u_d, v_d, w_d, rho_w_d
     type(c_ptr), intent(in) :: n_x_d, n_y_d, n_z_d, h_d, nu_d
     type(c_ptr), intent(inout) :: tau_x_d, tau_y_d, tau_z_d
-    real(kind=rp), intent(in) :: kappa
+    real(kind=rp), intent(in) :: kappa, C, B1, B2
 
 #if HAVE_HIP
     call hip_reichardt_compute(u_d, v_d, w_d, &
          n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
-         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, tstep)
+         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, C, B1, B2, &
+         tstep)
 #elif HAVE_CUDA
     call cuda_reichardt_compute(u_d, v_d, w_d, &
          n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
-         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, tstep)
+         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, C, B1, B2, &
+         tstep)
 #elif HAVE_OPENCL
     call opencl_reichardt_compute(u_d, v_d, w_d, &
          n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
-         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, tstep)
+         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, C, B1, B2, &
+         tstep)
 #elif HAVE_METAL
     call metal_reichardt_compute(u_d, v_d, w_d, &
          n_x_d, n_y_d, n_z_d, nu_d, rho_w_d, h_d, &
-         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, tstep)
+         tau_x_d, tau_y_d, tau_z_d, n_nodes, kappa, C, B1, B2, &
+         tstep)
 #else
     call neko_error('No device backend configured')
 #endif

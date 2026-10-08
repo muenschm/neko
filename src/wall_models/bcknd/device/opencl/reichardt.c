@@ -61,13 +61,17 @@
  * @param tau_z_d The z-component of the wall shear stress.
  * @param n_nodes The number of wall points.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tstep The current time-step.
  */
 void opencl_reichardt_compute(void *u_d, void *v_d, void *w_d,
                               void *n_x_d, void *n_y_d, void *n_z_d,
                               void *nu_d, void *rho_w_d, void *h_d,
                               void *tau_x_d, void *tau_y_d, void *tau_z_d,
-                              int *n_nodes, real *kappa, int *tstep) {
+                              int *n_nodes, real *kappa, real *C, real *B1,
+                              real *B2, int *tstep) {
   cl_int err;
 
   if (*n_nodes < 1) return;
@@ -94,7 +98,10 @@ void opencl_reichardt_compute(void *u_d, void *v_d, void *w_d,
   CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *) &tau_z_d));
   CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int), n_nodes));
   CL_CHECK(clSetKernelArg(kernel, 13, sizeof(real), kappa));
-  CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int), tstep));
+  CL_CHECK(clSetKernelArg(kernel, 14, sizeof(real), C));
+  CL_CHECK(clSetKernelArg(kernel, 15, sizeof(real), B1));
+  CL_CHECK(clSetKernelArg(kernel, 16, sizeof(real), B2));
+  CL_CHECK(clSetKernelArg(kernel, 17, sizeof(int), tstep));
 
   const int nb = ((*n_nodes) + 256 - 1) / 256;
   const size_t global_item_size = 256 * nb;

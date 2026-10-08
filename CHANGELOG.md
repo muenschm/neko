@@ -5,6 +5,8 @@
 - Added the `reichardt` wall model, based on Reichardt's law of the wall,
   which blends the viscous sublayer, buffer layer and logarithmic region in a
   single formula. Available for the CPU, CUDA, HIP, OpenCL and Metal backends.
+  Besides the required `kappa`, the constants `C`, `B1` and `B2` of the law can
+  be set in the case file and default to their original values.
 - Error and warning routines are now hooked to pFUnit's exceptions, making it
   possible to test for error emission.
 - Added format-independent checkpoint payloads for registering named fields,

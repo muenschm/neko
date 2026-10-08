@@ -42,32 +42,34 @@
  * Reichardt's law of the wall, u+ as a function of y+.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
 template<typename T>
-__device__ T reichardt_up(const T yp, const T kappa) {
+__device__ T reichardt_up(const T yp, const T kappa, const T C,
+                          const T B1, const T B2) {
   const T one = static_cast<T>(1.0);
-  const T A = static_cast<T>(11.0);
-  const T C = static_cast<T>(3.0);
-  const T D = static_cast<T>(7.8);
 
   return log(one + kappa * yp) / kappa +
-    D * (one - exp(-yp / A) - yp / A * exp(-yp / C));
+    C * (one - exp(-yp / B1) - yp / B1 * exp(-yp / B2));
 }
 
 /**
  * Derivative du+/dy+ of Reichardt's law of the wall.
  * @param yp The wall-normal distance in wall units.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  */
 template<typename T>
-__device__ T reichardt_dup(const T yp, const T kappa) {
+__device__ T reichardt_dup(const T yp, const T kappa, const T C,
+                           const T B1, const T B2) {
   const T one = static_cast<T>(1.0);
-  const T A = static_cast<T>(11.0);
-  const T C = static_cast<T>(3.0);
-  const T D = static_cast<T>(7.8);
 
   return one / (one + kappa * yp) +
-    D / A * (exp(-yp / A) - (one - yp / C) * exp(-yp / C));
+    C / B1 * (exp(-yp / B1) - (one - yp / B2) * exp(-yp / B2));
 }
 
 /**
@@ -77,22 +79,26 @@ __device__ T reichardt_dup(const T yp, const T kappa) {
  * @param guess Initial guess.
  * @param nu The kinematic viscosity.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tol The relative convergence tolerance.
  */
 template<typename T>
 __device__ T reichardt_solve(const T u, const T y, const T guess,
-                             const T nu, const T kappa, const T tol) {
+                             const T nu, const T kappa, const T C,
+                             const T B1, const T B2, const T tol) {
   T utau = guess;
   const int maxiter = 100;
 
   for (int k = 0; k < maxiter; ++k) {
     const T old = utau;
     const T yp = y * utau / nu;
-    const T up = reichardt_up(yp, kappa);
+    const T up = reichardt_up(yp, kappa, C, B1, B2);
 
     // Evaluate function and its derivative
     const T f = utau * up - u;
-    const T df = up + yp * reichardt_dup(yp, kappa);
+    const T df = up + yp * reichardt_dup(yp, kappa, C, B1, B2);
 
     // Update solution, keeping utau positive
     utau -= f / df;
@@ -124,6 +130,9 @@ __device__ T reichardt_solve(const T u, const T y, const T guess,
  * @param tau_z_d The z-component of the wall shear stress.
  * @param n_nodes The number of wall points.
  * @param kappa The von Karman coefficient.
+ * @param C The amplitude of the exponential correction.
+ * @param B1 The damping length scale, in wall units.
+ * @param B2 The decay length scale of the second exponential term.
  * @param tstep The current time-step.
  */
 template<typename T>
@@ -141,6 +150,9 @@ __global__ void reichardt_compute(const T * __restrict__ u_d,
                                   T * __restrict__ tau_z_d,
                                   const int n_nodes,
                                   const T kappa,
+                                  const T C,
+                                  const T B1,
+                                  const T B2,
                                   const int tstep) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int str = blockDim.x * gridDim.x;
@@ -188,7 +200,8 @@ __global__ void reichardt_compute(const T * __restrict__ u_d,
       guess = sqrt(sqrt(guess) / rho);
     }
 
-    const T utau = reichardt_solve(magu, h, guess, nu, kappa, tol);
+    const T utau = reichardt_solve(magu, h, guess, nu, kappa, C, B1, B2,
+                                   tol);
 
     // Distribute according to the velocity vector
     tau_x_d[i] = -rho * utau * utau * ui / magu;
