@@ -238,7 +238,7 @@ contains
     us = 0.0_rp
     if (ys .le. 0.0_rp) return
 
-    apg = (1.0_rp - alpha)**1.5_rp
+    apg = max(1.0_rp - alpha, 0.0_rp)**1.5_rp
     damp = 1.0_rp + A * alpha**3
     ds = log(1.0_rp + ys) / real(N_SUB, rp)
 
@@ -267,12 +267,14 @@ contains
   !! @param A The damping constant.
   pure function residual(utau, u, y, nu, up, sp, kappa, beta, A) result(f)
     real(kind=rp), intent(in) :: utau, u, y, nu, up, sp, kappa, beta, A
-    real(kind=rp) :: f, utp
+    real(kind=rp) :: f, utp, alpha
 
-    ! Extended velocity scale u_tau_p = sqrt(u_tau^2 + u_p^2), Eq. (4)
+    ! Extended velocity scale u_tau_p = sqrt(u_tau^2 + u_p^2), Eq. (4).
+    ! alpha is formed without the square root, so that it cannot exceed 1
+    ! by rounding.
     utp = sqrt(utau**2 + up**2)
-    f = utp * duprat_u_star(y * utp / nu, utau**2 / utp**2, sp, &
-         kappa, beta, A) - u
+    alpha = utau**2 / (utau**2 + up**2)
+    f = utp * duprat_u_star(y * utp / nu, alpha, sp, kappa, beta, A) - u
   end function residual
 
   !> Safeguarded Newton solver for the friction velocity.

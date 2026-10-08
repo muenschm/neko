@@ -6,7 +6,8 @@
   the wall-tangential pressure gradient through an extended velocity scale and
   a pressure-gradient-dependent eddy viscosity. The pressure gradient is either
   prescribed as a constant or evaluated locally from the pressure field and
-  filtered in time. Currently available on the CPU backend.
+  filtered in time. Available for the CPU, CUDA, HIP, OpenCL and Metal
+  backends.
 - Added the `reichardt` wall model, based on Reichardt's law of the wall,
   which blends the viscous sublayer, buffer layer and logarithmic region in a
   single formula. Available for the CPU, CUDA, HIP, OpenCL and Metal backends.

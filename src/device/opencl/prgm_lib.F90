@@ -166,6 +166,9 @@ module opencl_prgm_lib
   !> Device Reichardt wall model kernels
   type(c_ptr), public, bind(c) :: reichardt_program = C_NULL_PTR
 
+  !> Device Duprat wall model kernels
+  type(c_ptr), public, bind(c) :: duprat_program = C_NULL_PTR
+
   !> Device Richardson wall model kernels
   type(c_ptr), public, bind(c) :: richardson_program = C_NULL_PTR
 
@@ -545,6 +548,13 @@ contains
           call neko_error('Failed to release program')
        end if
        reichardt_program = C_NULL_PTR
+    end if
+
+    if (c_associated(duprat_program)) then
+       if (clReleaseProgram(duprat_program) .ne. CL_SUCCESS) then
+          call neko_error('Failed to release program')
+       end if
+       duprat_program = C_NULL_PTR
     end if
 
     if (c_associated(richardson_program)) then
