@@ -488,9 +488,11 @@ neko_fortran_SOURCES = \
 	wall_models/spalding.f90\
 	wall_models/cai_sagaut_model_ii.f90\
 	wall_models/reichardt.f90\
+	wall_models/duprat.f90\
 	wall_models/bcknd/cpu/spalding_cpu.f90\
 	wall_models/bcknd/cpu/cai_sagaut_model_ii_cpu.f90\
 	wall_models/bcknd/cpu/reichardt_cpu.f90\
+	wall_models/bcknd/cpu/duprat_cpu.f90\
 	wall_models/bcknd/device/reichardt_device.F90\
 	wall_models/bcknd/device/spalding_device.F90\
 	wall_models/bcknd/device/cai_sagaut_model_ii_device.F90\

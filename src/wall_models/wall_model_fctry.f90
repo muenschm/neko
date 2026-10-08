@@ -35,6 +35,7 @@ submodule (wall_model) wall_model_fctry
   use spalding, only : spalding_t
   use cai_sagaut_model_ii, only : cai_sagaut_model_ii_t
   use reichardt, only : reichardt_t
+  use duprat, only : duprat_t
   use rough_log_law, only : rough_log_law_t
   use most, only : most_t
   use richardson, only : richardson_t
@@ -43,10 +44,11 @@ submodule (wall_model) wall_model_fctry
   implicit none
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: WALLM_KNOWN_TYPES(6) = [character(len=20) :: &
+  character(len=20) :: WALLM_KNOWN_TYPES(7) = [character(len=20) :: &
        "spalding", &
        "cai_sagaut_model_ii", &
        "reichardt", &
+       "duprat", &
        "rough_log_law", &
        "most", &
        "richardson"]
@@ -99,6 +101,8 @@ contains
        allocate(cai_sagaut_model_ii_t::object)
     case ("reichardt")
        allocate(reichardt_t::object)
+    case ("duprat")
+       allocate(duprat_t::object)
     case ("rough_log_law")
        allocate(rough_log_law_t::object)
     case ("most")
