@@ -594,6 +594,46 @@
               ],
               "properties": {
                 "model": {
+                  "const": "duprat"
+                },
+                "kappa": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "beta": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "A": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "pressure_gradient": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "constant"
+                    },
+                    "value": {
+                      "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": true
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/wallModelBase"
+            },
+            {
+              "type": "object",
+              "required": [
+                "kappa"
+              ],
+              "properties": {
+                "model": {
                   "const": "reichardt"
                 },
                 "kappa": {

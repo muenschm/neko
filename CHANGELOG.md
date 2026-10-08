@@ -2,6 +2,10 @@
 
 ## Develop
 
+- Added the `duprat` wall model of Duprat et al. (2011), which accounts for
+  the wall-tangential pressure gradient through an extended velocity scale and
+  a pressure-gradient-dependent eddy viscosity. Currently supports a constant,
+  prescribed pressure gradient on the CPU backend.
 - Added the `reichardt` wall model, based on Reichardt's law of the wall,
   which blends the viscous sublayer, buffer layer and logarithmic region in a
   single formula. Available for the CPU, CUDA, HIP, OpenCL and Metal backends.
