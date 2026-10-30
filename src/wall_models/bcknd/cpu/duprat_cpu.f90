@@ -87,9 +87,10 @@ contains
     real(kind=rp), dimension(n_nodes), intent(inout) :: alpha
     real(kind=rp), intent(in) :: kappa, beta, A
     integer :: i
-    real(kind=rp) :: ui, vi, wi, magu, utau, normu, guess, rho, up
+    real(kind=rp) :: ui, vi, wi, magu, utau, normu, guess, rho, up, sp, st
 
-    !$omp parallel do private(i, ui, vi, wi, magu, utau, normu, guess, rho, up)
+    !$omp parallel do private(i, ui, vi, wi, magu, utau, normu, guess, rho, &
+    !$omp& up, sp, st)
     do i = 1, n_nodes
        ! Load the sampled velocity
        ui = u(i)
@@ -118,6 +119,17 @@ contains
        ! Pressure velocity u_p = |(nu / rho) dp/ds|^(1/3), Duprat et al.
        ! (2011), Eq. (4). The pressure p in Neko is the dynamic pressure.
        up = (nu(i) * abs(dpds(i)) / rho)**(1.0_rp / 3.0_rp)
+       sp = sign(1.0_rp, dpds(i))
+
+       ! Sign of the wall shear stress relative to the flow, sign(tau_w) in
+       ! Eq. (5). At the separation point, alpha = 0, an adverse gradient
+       ! alone gives the velocity u_p U*(h u_p / nu). A smaller sampled
+       ! velocity means reversed flow below the sampling point.
+       st = 1.0_rp
+       if (sp .gt. 0.0_rp .and. up .gt. 0.0_rp) then
+          if (up * duprat_u_star(h(i) * up / nu(i), 0.0_rp, sp, st, kappa, &
+               beta, A) .gt. magu) st = -1.0_rp
+       end if
 
        ! Get initial guess for Newton solver
        guess = tau_x(i)**2 + tau_y(i)**2 + tau_z(i)**2
@@ -127,13 +139,13 @@ contains
           guess = sqrt(sqrt(guess) / rho)
        end if
 
-       utau = solve_cpu(magu, h(i), guess, nu(i), up, sign(1.0_rp, dpds(i)), &
-            kappa, beta, A)
+       utau = solve_cpu(magu, h(i), guess, nu(i), up, sp, st, kappa, beta, A)
 
-       ! Distribute according to the velocity vector
-       tau_x(i) = -rho*utau**2 * ui / magu
-       tau_y(i) = -rho*utau**2 * vi / magu
-       tau_z(i) = -rho*utau**2 * wi / magu
+       ! Distribute according to the velocity vector. The stress opposes the
+       ! near-wall flow, which is reversed for st = -1.
+       tau_x(i) = -st * rho*utau**2 * ui / magu
+       tau_y(i) = -st * rho*utau**2 * vi / magu
+       tau_z(i) = -st * rho*utau**2 * wi / magu
 
        ! alpha = u_tau^2 / u_tau_p^2, 1 without pressure gradient
        alpha(i) = 1.0_rp
@@ -143,27 +155,19 @@ contains
 
   end subroutine duprat_compute_cpu
 
-  !> Update the filtered wall-tangential pressure gradient on cpu.
+  !> Project the filtered pressure gradient on the flow direction on cpu.
   !!
-  !! At each wall node, the sampled pressure gradient is projected on the
-  !! direction of the sampled wall-parallel velocity, which gives the
+  !! At each wall node, the filtered pressure gradient vector is projected
+  !! on the direction of the sampled wall-parallel velocity, which gives the
   !! streamwise gradient dp/ds of Duprat et al. (2011), positive when adverse
-  !! to the local flow. It is limited to
+  !! to the local flow. Optionally, it is limited to
   !! \f$ |\partial p / \partial s| \le (\rho / \nu) (u \nu / h)^{3/2} \f$,
   !! i.e. the pressure velocity u_p may not exceed the friction velocity of
-  !! a laminar (Stokes) profile through the sampled velocity, which guards
-  !! the model against unphysical pressure spikes.
-  !!
-  !! The limited gradient is then filtered in time with an exponential
-  !! moving average, a first-order low-pass filter,
-  !! \f$ (\partial p / \partial s)_{filt}^{n} = (1 - \epsilon)
-  !! (\partial p / \partial s)_{filt}^{n-1} + \epsilon
-  !! (\partial p / \partial s)^{n} \f$,
-  !! where the weight \f$ \epsilon = 1 - e^{-\Delta t / T} \f$ follows from
-  !! the filter time constant T and is exact for variable time steps.
-  !! @param dpx The x component of the sampled pressure gradient.
-  !! @param dpy The y component of the sampled pressure gradient.
-  !! @param dpz The z component of the sampled pressure gradient.
+  !! a laminar (Stokes) profile through the sampled velocity. This limit is
+  !! not part of the model of Duprat et al.
+  !! @param dpx The x component of the filtered pressure gradient.
+  !! @param dpy The y component of the filtered pressure gradient.
+  !! @param dpz The z component of the filtered pressure gradient.
   !! @param u The x component of the sampled velocity.
   !! @param v The y component of the sampled velocity.
   !! @param w The z component of the sampled velocity.
@@ -173,17 +177,18 @@ contains
   !! @param nu The kinematic viscosity at the wall.
   !! @param rho_w The density at the wall.
   !! @param h The wall-normal distance of the sampling point.
-  !! @param eps The filter weight of the current gradient, in [0, 1].
-  !! @param dpds The filtered pressure gradient, updated in place.
+  !! @param stokes_limit Whether to limit the gradient to the Stokes bound.
+  !! @param dpds The pressure gradient along the flow direction. Nodes
+  !! without a wall-parallel velocity keep their previous value.
   !! @param n_nodes The number of wall nodes.
   subroutine duprat_update_dpds_cpu(dpx, dpy, dpz, u, v, w, n_x, n_y, n_z, &
-       nu, rho_w, h, eps, dpds, n_nodes)
+       nu, rho_w, h, stokes_limit, dpds, n_nodes)
     integer, intent(in) :: n_nodes
     real(kind=rp), dimension(n_nodes), intent(in) :: dpx, dpy, dpz
     real(kind=rp), dimension(n_nodes), intent(in) :: u, v, w
     real(kind=rp), dimension(n_nodes), intent(in) :: n_x, n_y, n_z
     real(kind=rp), dimension(n_nodes), intent(in) :: nu, rho_w, h
-    real(kind=rp), intent(in) :: eps
+    logical, intent(in) :: stokes_limit
     real(kind=rp), dimension(n_nodes), intent(inout) :: dpds
     integer :: i
     real(kind=rp) :: ui, vi, wi, normu, magu, dp, dp_max
@@ -197,18 +202,19 @@ contains
        wi = w(i) - normu * n_z(i)
        magu = sqrt(ui**2 + vi**2 + wi**2)
 
-       ! Without a flow direction, keep the previous filtered value
+       ! Without a flow direction, keep the previous value
        if (magu .le. NEKO_EPS) cycle
 
        ! Streamwise pressure gradient, positive when adverse
        dp = (dpx(i) * ui + dpy(i) * vi + dpz(i) * wi) / magu
 
        ! Limit to the Stokes bound, u_p <= sqrt(u nu / h)
-       dp_max = rho_w(i) / nu(i) * (magu * nu(i) / h(i))**1.5_rp
-       dp = sign(min(abs(dp), dp_max), dp)
+       if (stokes_limit) then
+          dp_max = rho_w(i) / nu(i) * (magu * nu(i) / h(i))**1.5_rp
+          dp = sign(min(abs(dp), dp_max), dp)
+       end if
 
-       ! Exponential moving average
-       dpds(i) = (1.0_rp - eps) * dpds(i) + eps * dp
+       dpds(i) = dp
     end do
     !$omp end parallel do
 
@@ -216,7 +222,7 @@ contains
 
   !> Dimensionless velocity U*(y*) of the model of Duprat et al. (2011).
   !! Integrates Eq. (5),
-  !! \f$ \frac{dU^*}{dy^*} = \frac{s_p (1 - \alpha)^{3/2} y^* + \alpha}
+  !! \f$ \frac{dU^*}{dy^*} = \frac{s_p (1 - \alpha)^{3/2} y^* + s_\tau \alpha}
   !! {1 + \nu_t / \nu} \f$, with the eddy viscosity of Eq. (6),
   !! \f$ \frac{\nu_t}{\nu} = \kappa y^* [\alpha + y^* (1 - \alpha)^{3/2}]^\beta
   !! (1 - e^{-y^* / (1 + A \alpha^3)})^2 \f$.
@@ -226,11 +232,13 @@ contains
   !! @param ys The upper integration limit y*.
   !! @param alpha The ratio u_tau^2 / u_tau_p^2.
   !! @param sp The sign of the pressure gradient relative to the flow.
+  !! @param st The sign of the wall shear stress relative to the flow, -1
+  !! for reversed flow at the wall.
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term.
   !! @param A The damping constant.
-  pure function duprat_u_star(ys, alpha, sp, kappa, beta, A) result(us)
-    real(kind=rp), intent(in) :: ys, alpha, sp, kappa, beta, A
+  pure function duprat_u_star(ys, alpha, sp, st, kappa, beta, A) result(us)
+    real(kind=rp), intent(in) :: ys, alpha, sp, st, kappa, beta, A
     real(kind=rp) :: us
     real(kind=rp) :: ds, s0, eta, apg, damp, nut
     integer :: j, k
@@ -249,24 +257,28 @@ contains
           nut = kappa * eta * (alpha + eta * apg)**beta * &
                (1.0_rp - exp(-eta / damp))**2
           ! dU*/dy* times the Jacobian d(eta)/ds = 1 + eta
-          us = us + GL_W(j) * ds * (sp * apg * eta + alpha) / &
+          us = us + GL_W(j) * ds * (sp * apg * eta + st * alpha) / &
                (1.0_rp + nut) * (1.0_rp + eta)
        end do
     end do
   end function duprat_u_star
 
-  !> Residual f(utau) = u_tau_p U*(y*) - u of the model of Duprat et al.
+  !> Residual f(utau) = s_tau (u_tau_p U*(y*) - u) of the model of Duprat
+  !! et al. The factor s_tau makes f grow with utau for large utau on both
+  !! branches.
   !! @param utau The friction velocity.
   !! @param u The tangential velocity magnitude.
   !! @param y The wall-normal distance.
   !! @param nu The kinematic viscosity.
   !! @param up The pressure velocity.
   !! @param sp The sign of the pressure gradient relative to the flow.
+  !! @param st The sign of the wall shear stress relative to the flow.
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term.
   !! @param A The damping constant.
-  pure function residual(utau, u, y, nu, up, sp, kappa, beta, A) result(f)
-    real(kind=rp), intent(in) :: utau, u, y, nu, up, sp, kappa, beta, A
+  pure function residual(utau, u, y, nu, up, sp, st, kappa, beta, A) &
+       result(f)
+    real(kind=rp), intent(in) :: utau, u, y, nu, up, sp, st, kappa, beta, A
     real(kind=rp) :: f, utp, alpha
 
     ! Extended velocity scale u_tau_p = sqrt(u_tau^2 + u_p^2), Eq. (4).
@@ -274,7 +286,8 @@ contains
     ! by rounding.
     utp = sqrt(utau**2 + up**2)
     alpha = utau**2 / (utau**2 + up**2)
-    f = utp * duprat_u_star(y * utp / nu, alpha, sp, kappa, beta, A) - u
+    f = st * (utp * duprat_u_star(y * utp / nu, alpha, sp, st, kappa, beta, &
+         A) - u)
   end function residual
 
   !> Safeguarded Newton solver for the friction velocity.
@@ -288,11 +301,13 @@ contains
   !! @param nu The kinematic viscosity.
   !! @param up The pressure velocity.
   !! @param sp The sign of the pressure gradient relative to the flow.
+  !! @param st The sign of the wall shear stress relative to the flow.
   !! @param kappa The von Karman coefficient.
   !! @param beta The exponent of the pressure-gradient term.
   !! @param A The damping constant.
-  function solve_cpu(u, y, guess, nu, up, sp, kappa, beta, A) result(utau)
-    real(kind=rp), intent(in) :: u, y, guess, nu, up, sp, kappa, beta, A
+  function solve_cpu(u, y, guess, nu, up, sp, st, kappa, beta, A) &
+       result(utau)
+    real(kind=rp), intent(in) :: u, y, guess, nu, up, sp, st, kappa, beta, A
     real(kind=rp) :: utau
     real(kind=rp) :: f, df, delta, lo, hi, f_lo, f_hi, step, tol, tiny
     integer :: k
@@ -308,17 +323,17 @@ contains
     ! from the guess. f grows without bound for large utau.
     lo = max(guess, tiny)
     hi = lo
-    f_lo = residual(lo, u, y, nu, up, sp, kappa, beta, A)
+    f_lo = residual(lo, u, y, nu, up, sp, st, kappa, beta, A)
     f_hi = f_lo
     do k = 1, maxiter
        if (f_hi .gt. 0.0_rp) exit
        hi = 2.0_rp * hi
-       f_hi = residual(hi, u, y, nu, up, sp, kappa, beta, A)
+       f_hi = residual(hi, u, y, nu, up, sp, st, kappa, beta, A)
     end do
     do k = 1, maxiter
        if (f_lo .lt. 0.0_rp .or. lo .le. tiny) exit
        lo = max(0.5_rp * lo, tiny)
-       f_lo = residual(lo, u, y, nu, up, sp, kappa, beta, A)
+       f_lo = residual(lo, u, y, nu, up, sp, st, kappa, beta, A)
     end do
 
     ! No sign change down to utau ~ 0: the shear stress vanishes.
@@ -329,7 +344,7 @@ contains
 
     utau = 0.5_rp * (lo + hi)
     if (guess .gt. lo .and. guess .lt. hi) utau = guess
-    f = residual(utau, u, y, nu, up, sp, kappa, beta, A)
+    f = residual(utau, u, y, nu, up, sp, st, kappa, beta, A)
 
     do k = 1, maxiter
        ! Shrink the bracket
@@ -342,7 +357,7 @@ contains
        ! Newton step with a finite-difference derivative, or bisection if
        ! the step leaves the bracket.
        delta = sqrt(NEKO_EPS) * utau
-       df = (residual(utau + delta, u, y, nu, up, sp, kappa, beta, A) - f) &
+       df = (residual(utau + delta, u, y, nu, up, sp, st, kappa, beta, A) - f) &
             / delta
        step = f / df
        if (df .le. 0.0_rp .or. utau - step .le. lo .or. &
@@ -356,7 +371,7 @@ contains
           converged = .true.
           exit
        end if
-       f = residual(utau, u, y, nu, up, sp, kappa, beta, A)
+       f = residual(utau, u, y, nu, up, sp, st, kappa, beta, A)
     end do
 
     if (.not. converged) then

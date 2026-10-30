@@ -40,19 +40,22 @@
 
 /**
  * Dimensionless velocity U*(y*) of the model of Duprat et al. (2011).
- * Integrates dU* / dy* = (s_p (1 - alpha)^(3/2) y* + alpha) / (1 + nu_t / nu),
+ * Integrates
+ * dU* / dy* = (s_p (1 - alpha)^(3/2) y* + s_tau alpha) / (1 + nu_t / nu),
  * Eq. (5), with the eddy viscosity of Eq. (6), using a composite 12 x 5-point
  * Gauss-Legendre rule in the stretched coordinate s = ln(1 + y*).
  * @param ys The upper integration limit y*.
  * @param alpha The ratio u_tau^2 / u_tau_p^2.
  * @param sp The sign of the pressure gradient relative to the flow.
+ * @param st The sign of the wall shear stress relative to the flow, -1
+ * for reversed flow at the wall.
  * @param kappa The von Karman coefficient.
  * @param beta The exponent of the pressure-gradient term.
  * @param A The damping constant.
  */
 template <typename T>
-__device__ T duprat_u_star(const T ys, const T alpha, const T sp, const T kappa,
-                           const T beta, const T A) {
+__device__ T duprat_u_star(const T ys, const T alpha, const T sp, const T st,
+                           const T kappa, const T beta, const T A) {
   const T gl_x[5] = {static_cast<T>(0.0469100770306680),
                      static_cast<T>(0.2307653449471585), static_cast<T>(0.5),
                      static_cast<T>(0.7692346550528415),
@@ -81,23 +84,27 @@ __device__ T duprat_u_star(const T ys, const T alpha, const T sp, const T kappa,
       const T edamp = one - exp(-eta / damp);
       const T nut = kappa * eta * pow(alpha + eta * apg, beta) * edamp * edamp;
       /* dU^+ / dy^+ times the Jacobian d(eta) / ds = 1 + eta */
-      us += gl_w[j] * ds * (sp * apg * eta + alpha) / (one + nut) * (one + eta);
+      us += gl_w[j] * ds * (sp * apg * eta + st * alpha) / (one + nut) *
+            (one + eta);
     }
   }
   return us;
 }
 
 /**
- * Residual f(utau) = u_tau_p U*(y*) - u of the model of Duprat et al.
+ * Residual f(utau) = s_tau (u_tau_p U*(y*) - u) of the model of Duprat et
+ * al. The factor s_tau makes f grow with utau for large utau on both
+ * branches.
  */
 template <typename T>
 __device__ T duprat_residual(const T utau, const T u, const T y, const T nu,
-                             const T up, const T sp, const T kappa,
+                             const T up, const T sp, const T st, const T kappa,
                              const T beta, const T A) {
   const T utp = sqrt(utau * utau + up * up);
   /* alpha without the square root, so that it cannot exceed 1 */
   const T alpha = utau * utau / (utau * utau + up * up);
-  return utp * duprat_u_star(y * utp / nu, alpha, sp, kappa, beta, A) - u;
+  return st *
+         (utp * duprat_u_star(y * utp / nu, alpha, sp, st, kappa, beta, A) - u);
 }
 
 /**
@@ -108,8 +115,8 @@ __device__ T duprat_residual(const T utau, const T u, const T y, const T nu,
  */
 template <typename T>
 __device__ T duprat_solve(const T u, const T y, const T guess, const T nu,
-                          const T up, const T sp, const T kappa, const T beta,
-                          const T A) {
+                          const T up, const T sp, const T st, const T kappa,
+                          const T beta, const T A) {
   const int maxiter = 100;
   const T eps = (sizeof(T) == sizeof(float)) ? static_cast<T>(FLT_EPSILON)
                                              : static_cast<T>(DBL_EPSILON);
@@ -121,16 +128,16 @@ __device__ T duprat_solve(const T u, const T y, const T guess, const T nu,
   /* Bracket the root, f(lo) < 0 < f(hi) */
   T lo = (guess > tiny) ? guess : tiny;
   T hi = lo;
-  T f_lo = duprat_residual(lo, u, y, nu, up, sp, kappa, beta, A);
+  T f_lo = duprat_residual(lo, u, y, nu, up, sp, st, kappa, beta, A);
   T f_hi = f_lo;
   for (int k = 0; k < maxiter && f_hi <= static_cast<T>(0.0); ++k) {
     hi = static_cast<T>(2.0) * hi;
-    f_hi = duprat_residual(hi, u, y, nu, up, sp, kappa, beta, A);
+    f_hi = duprat_residual(hi, u, y, nu, up, sp, st, kappa, beta, A);
   }
   for (int k = 0; k < maxiter && f_lo >= static_cast<T>(0.0) && lo > tiny;
        ++k) {
     lo = (static_cast<T>(0.5) * lo > tiny) ? static_cast<T>(0.5) * lo : tiny;
-    f_lo = duprat_residual(lo, u, y, nu, up, sp, kappa, beta, A);
+    f_lo = duprat_residual(lo, u, y, nu, up, sp, st, kappa, beta, A);
   }
 
   /* No sign change down to utau ~ 0: the shear stress vanishes */
@@ -140,7 +147,7 @@ __device__ T duprat_solve(const T u, const T y, const T guess, const T nu,
   T utau = static_cast<T>(0.5) * (lo + hi);
   if (guess > lo && guess < hi)
     utau = guess;
-  T f = duprat_residual(utau, u, y, nu, up, sp, kappa, beta, A);
+  T f = duprat_residual(utau, u, y, nu, up, sp, st, kappa, beta, A);
 
   for (int k = 0; k < maxiter; ++k) {
     /* Shrink the bracket */
@@ -153,7 +160,8 @@ __device__ T duprat_solve(const T u, const T y, const T guess, const T nu,
     /* Newton step, or bisection if it leaves the bracket */
     const T delta = sqrt(eps) * utau;
     const T df =
-        (duprat_residual(utau + delta, u, y, nu, up, sp, kappa, beta, A) - f) /
+        (duprat_residual(utau + delta, u, y, nu, up, sp, st, kappa, beta, A) -
+         f) /
         delta;
     T step = f / df;
     if (df <= static_cast<T>(0.0) || utau - step <= lo || utau - step >= hi) {
@@ -163,7 +171,7 @@ __device__ T duprat_solve(const T u, const T y, const T guess, const T nu,
 
     if (fabs(step) < tol * utau || (hi - lo) < tol * utau)
       break;
-    f = duprat_residual(utau, u, y, nu, up, sp, kappa, beta, A);
+    f = duprat_residual(utau, u, y, nu, up, sp, st, kappa, beta, A);
   }
   return utau;
 }
@@ -240,6 +248,18 @@ duprat_compute(const T *__restrict__ u_d, const T *__restrict__ v_d,
         pow(nu * fabs(dp) / rho, static_cast<T>(1.0) / static_cast<T>(3.0));
     const T sp = copysign(static_cast<T>(1.0), dp);
 
+    /* Sign of the wall shear stress relative to the flow, sign(tau_w) in
+       Eq. (5). At the separation point, alpha = 0, an adverse gradient
+       alone gives the velocity u_p U*(h u_p / nu). A smaller sampled
+       velocity means reversed flow below the sampling point. */
+    T st = static_cast<T>(1.0);
+    if (sp > static_cast<T>(0.0) && up > static_cast<T>(0.0)) {
+      const T u_sep = up * duprat_u_star(h * up / nu, static_cast<T>(0.0), sp,
+                                         st, kappa, beta, A);
+      if (u_sep > magu)
+        st = -static_cast<T>(1.0);
+    }
+
     /* Get initial guess for the Newton solver */
     T guess = tau_x_d[i] * tau_x_d[i] + tau_y_d[i] * tau_y_d[i] +
               tau_z_d[i] * tau_z_d[i];
@@ -249,12 +269,13 @@ duprat_compute(const T *__restrict__ u_d, const T *__restrict__ v_d,
       guess = sqrt(sqrt(guess) / rho);
     }
 
-    const T utau = duprat_solve(magu, h, guess, nu, up, sp, kappa, beta, A);
+    const T utau = duprat_solve(magu, h, guess, nu, up, sp, st, kappa, beta, A);
 
-    /* Distribute according to the velocity vector */
-    tau_x_d[i] = -rho * utau * utau * ui / magu;
-    tau_y_d[i] = -rho * utau * utau * vi / magu;
-    tau_z_d[i] = -rho * utau * utau * wi / magu;
+    /* Distribute according to the velocity vector. The stress opposes the
+       near-wall flow, which is reversed for st = -1. */
+    tau_x_d[i] = -st * rho * utau * utau * ui / magu;
+    tau_y_d[i] = -st * rho * utau * utau * vi / magu;
+    tau_z_d[i] = -st * rho * utau * utau * wi / magu;
 
     /* alpha = u_tau^2 / u_tau_p^2, 1 without pressure gradient */
     alpha_d[i] = (up > static_cast<T>(0.0))
@@ -264,12 +285,11 @@ duprat_compute(const T *__restrict__ u_d, const T *__restrict__ v_d,
 }
 
 /**
- * HIP kernel updating the filtered wall-tangential pressure gradient:
- * projection on the flow direction, Stokes limit and exponential moving
- * average.
- * @param dpx_d The x component of the sampled pressure gradient.
- * @param dpy_d The y component of the sampled pressure gradient.
- * @param dpz_d The z component of the sampled pressure gradient.
+ * HIP kernel projecting the filtered pressure gradient on the flow
+ * direction, optionally limited to the Stokes bound.
+ * @param dpx_d The x component of the filtered pressure gradient.
+ * @param dpy_d The y component of the filtered pressure gradient.
+ * @param dpz_d The z component of the filtered pressure gradient.
  * @param u_d The x component of the sampled velocity.
  * @param v_d The y component of the sampled velocity.
  * @param w_d The z component of the sampled velocity.
@@ -279,8 +299,9 @@ duprat_compute(const T *__restrict__ u_d, const T *__restrict__ v_d,
  * @param nu_d The kinematic viscosity at wall points.
  * @param rho_w_d The density at wall points.
  * @param h_d The wall-model sampling distances.
- * @param eps The filter weight of the current gradient.
- * @param dpds_d The filtered pressure gradient, updated in place.
+ * @param stokes_limit Whether to limit the gradient to the Stokes bound.
+ * @param dpds_d The pressure gradient along the flow direction. Nodes
+ * without a wall-parallel velocity keep their previous value.
  * @param n_nodes The number of wall points.
  */
 template <typename T>
@@ -291,7 +312,8 @@ duprat_update_dpds(const T *__restrict__ dpx_d, const T *__restrict__ dpy_d,
                    const T *__restrict__ n_x_d, const T *__restrict__ n_y_d,
                    const T *__restrict__ n_z_d, const T *__restrict__ nu_d,
                    const T *__restrict__ rho_w_d, const T *__restrict__ h_d,
-                   const T eps, T *__restrict__ dpds_d, const int n_nodes) {
+                   const int stokes_limit, T *__restrict__ dpds_d,
+                   const int n_nodes) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int str = blockDim.x * gridDim.x;
   const T eps_mach = (sizeof(T) == sizeof(float)) ? static_cast<T>(FLT_EPSILON)
@@ -305,7 +327,7 @@ duprat_update_dpds(const T *__restrict__ dpx_d, const T *__restrict__ dpy_d,
     const T wi = w_d[i] - normu * n_z_d[i];
     const T magu = sqrt(ui * ui + vi * vi + wi * wi);
 
-    /* Without a flow direction, keep the previous filtered value */
+    /* Without a flow direction, keep the previous value */
     if (magu <= eps_mach) {
       continue;
     }
@@ -314,13 +336,14 @@ duprat_update_dpds(const T *__restrict__ dpx_d, const T *__restrict__ dpy_d,
     T dp = (dpx_d[i] * ui + dpy_d[i] * vi + dpz_d[i] * wi) / magu;
 
     /* Limit to the Stokes bound, u_p <= sqrt(u nu / h) */
-    const T dp_max = rho_w_d[i] / nu_d[i] *
-                     pow(magu * nu_d[i] / h_d[i], static_cast<T>(1.5));
-    if (fabs(dp) > dp_max)
-      dp = copysign(dp_max, dp);
+    if (stokes_limit) {
+      const T dp_max = rho_w_d[i] / nu_d[i] *
+                       pow(magu * nu_d[i] / h_d[i], static_cast<T>(1.5));
+      if (fabs(dp) > dp_max)
+        dp = copysign(dp_max, dp);
+    }
 
-    /* Exponential moving average with weight eps = 1 - exp(-dt / T) */
-    dpds_d[i] = (static_cast<T>(1.0) - eps) * dpds_d[i] + eps * dp;
+    dpds_d[i] = dp;
   }
 }
 

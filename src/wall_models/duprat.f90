@@ -68,7 +68,9 @@ module duprat
   !! \f$ u_p = |(\nu / \rho) \partial p / \partial s|^{1/3} \f$, and a
   !! pressure-gradient-dependent mixing-length eddy viscosity. The velocity
   !! profile is obtained by integrating the simplified thin-boundary-layer
-  !! equation across the wall layer.
+  !! equation across the wall layer. Under an adverse gradient, the wall shear
+  !! stress reverses, sign(tau_w) = -1 in Eq. (5), where the sampled velocity
+  !! is smaller than the one of the separation profile.
   !! Reference: https://doi.org/10.1063/1.3529358
   !! The pressure gradient is either prescribed as a constant, or evaluated
   !! locally from the pressure field and filtered in time.
@@ -89,6 +91,8 @@ module duprat
      real(kind=rp) :: filter_time = 0.0_rp
      !> Time from which the local pressure gradient is taken into account.
      real(kind=rp) :: start_time = 0.0_rp
+     !> Whether the local pressure gradient is limited to the Stokes bound.
+     logical :: stokes_limit = .false.
      !> Time of the previous filter update.
      real(kind=rp) :: t_prev = 0.0_rp
      !> Time step of the previous filter update, -1 before the first one.
@@ -149,15 +153,16 @@ contains
     integer, intent(in) :: facet(:)
     type(json_file), intent(inout) :: json
     real(kind=rp) :: kappa, beta, A, dpds_constant, filter_time, start_time
-    logical :: local_dpds
+    logical :: local_dpds, stokes_limit
     class(wall_sampler_t), allocatable :: sampler
 
     call duprat_read_json(json, kappa, beta, A, local_dpds, dpds_constant, &
-         filter_time, start_time)
+         filter_time, start_time, stokes_limit)
 
     call wall_sampler_factory(sampler, json)
     call this%init_from_components(scheme_name, coef, msk, facet, sampler, &
-         kappa, beta, A, local_dpds, dpds_constant, filter_time, start_time)
+         kappa, beta, A, local_dpds, dpds_constant, filter_time, start_time, &
+         stokes_limit)
   end subroutine duprat_init
 
   !> Constructor from JSON.
@@ -174,7 +179,7 @@ contains
     call this%partial_init_base(coef, scheme_name, json)
     call duprat_read_json(json, this%kappa, this%beta, this%A, &
          this%local_dpds, this%dpds_constant, this%filter_time, &
-         this%start_time)
+         this%start_time, this%stokes_limit)
 
     call neko_log%section('Wall model')
     write(log_buf, '(A)') 'Model : Duprat'
@@ -191,6 +196,8 @@ contains
        write(log_buf, '(A, E15.7)') 'filter time : ', this%filter_time
        call neko_log%message(log_buf)
        write(log_buf, '(A, E15.7)') 'start time : ', this%start_time
+       call neko_log%message(log_buf)
+       write(log_buf, '(A, L1)') 'Stokes limit : ', this%stokes_limit
        call neko_log%message(log_buf)
     else
        write(log_buf, '(A, E15.7)') 'dp/ds (constant) : ', this%dpds_constant
@@ -209,12 +216,14 @@ contains
   !! @param dpds_constant The prescribed wall-tangential pressure gradient.
   !! @param filter_time The time constant of the pressure-gradient filter.
   !! @param start_time The time from which the local gradient is used.
+  !! @param stokes_limit Whether the local gradient is limited to the Stokes
+  !! bound.
   subroutine duprat_read_json(json, kappa, beta, A, local_dpds, &
-       dpds_constant, filter_time, start_time)
+       dpds_constant, filter_time, start_time, stokes_limit)
     type(json_file), intent(inout) :: json
     real(kind=rp), intent(out) :: kappa, beta, A, dpds_constant
     real(kind=rp), intent(out) :: filter_time, start_time
-    logical, intent(out) :: local_dpds
+    logical, intent(out) :: local_dpds, stokes_limit
     type(json_file) :: pg_json
     character(len=:), allocatable :: pg_type
 
@@ -229,6 +238,7 @@ contains
     dpds_constant = 0.0_rp
     filter_time = 0.0_rp
     start_time = 0.0_rp
+    stokes_limit = .false.
     select case (trim(pg_type))
     case ("constant")
        local_dpds = .false.
@@ -239,6 +249,8 @@ contains
        call json_get_or_lookup(pg_json, "filter_time", filter_time)
        call json_get_or_lookup_or_default(pg_json, "start_time", start_time, &
             0.0_rp)
+       call json_get_or_default(pg_json, "stokes_limit", stokes_limit, &
+            .false.)
        if (filter_time .lt. 0.0_rp) then
           call neko_error("The pressure_gradient filter_time of the " // &
                "duprat wall model must not be negative")
@@ -284,9 +296,11 @@ contains
   !! pressure gradient, 0 for no filtering.
   !! @param start_time The time from which the local pressure gradient is
   !! used. Before, the model runs with a zero pressure gradient.
+  !! @param stokes_limit Whether the local pressure gradient is limited to
+  !! the Stokes bound, see `duprat_update_dpds_cpu`.
   subroutine duprat_init_from_components(this, scheme_name, coef, msk, &
        facet, sampler, kappa, beta, A, local_dpds, dpds_constant, &
-       filter_time, start_time)
+       filter_time, start_time, stokes_limit)
     class(duprat_t), intent(inout) :: this
     character(len=*), intent(in) :: scheme_name
     type(coef_t), intent(in) :: coef
@@ -295,7 +309,7 @@ contains
     class(wall_sampler_t), allocatable, intent(inout) :: sampler
     real(kind=rp), intent(in) :: kappa, beta, A, dpds_constant
     real(kind=rp), intent(in) :: filter_time, start_time
-    logical, intent(in) :: local_dpds
+    logical, intent(in) :: local_dpds, stokes_limit
 
     call this%free()
     call this%init_base(scheme_name, coef, msk, facet, sampler)
@@ -307,6 +321,7 @@ contains
     this%dpds_constant = dpds_constant
     this%filter_time = filter_time
     this%start_time = start_time
+    this%stokes_limit = stokes_limit
 
     call duprat_init_vectors(this)
   end subroutine duprat_init_from_components
@@ -488,8 +503,8 @@ contains
   !!    G_filt^n = (1 - eps) G_filt^(n-1) + eps G^n,
   !!    with eps = 1 - exp(-dt / filter_time).
   !! 3. The filtered vector is projected on the current wall-parallel flow
-  !!    direction and limited to the Stokes bound; see
-  !!    `duprat_update_dpds_cpu`, which is called with eps = 1.
+  !!    direction and, if `stokes_limit` is set, limited to the Stokes bound;
+  !!    see `duprat_update_dpds_cpu`.
   !!
   !! Filtering the vector before the projection matters where the flow
   !! direction changes often, as in separated regions: averaging the
@@ -571,19 +586,19 @@ contains
     call vector_add2s2(this%dpy_f, this%dpy_s, eps)
     call vector_add2s2(this%dpz_f, this%dpz_s, eps)
 
-    ! Project on the current flow direction and limit; no further filtering
+    ! Project on the current flow direction
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call duprat_update_dpds_device(this%dpx_f%x_d, this%dpy_f%x_d, &
             this%dpz_f%x_d, this%u_s%x_d, this%v_s%x_d, this%w_s%x_d, &
             this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
-            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, 1.0_rp, &
-            this%dpds%x_d, this%n_nodes)
+            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, &
+            this%stokes_limit, this%dpds%x_d, this%n_nodes)
     else
        call duprat_update_dpds_cpu(this%dpx_f%x, this%dpy_f%x, &
             this%dpz_f%x, this%u_s%x, this%v_s%x, this%w_s%x, &
             this%n_x%x, this%n_y%x, this%n_z%x, &
-            this%nu%x, this%rho_w%x, this%sampler%h%x, 1.0_rp, this%dpds%x, &
-            this%n_nodes)
+            this%nu%x, this%rho_w%x, this%sampler%h%x, this%stokes_limit, &
+            this%dpds%x, this%n_nodes)
     end if
 
     nullify(p, dpdx, dpdy, dpdz)

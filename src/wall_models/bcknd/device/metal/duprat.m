@@ -107,11 +107,11 @@ void metal_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
 }
 
 /**
- * Fortran wrapper for the Metal pressure-gradient update of the Duprat wall
- * model.
- * @param dpx_d The x component of the sampled pressure gradient.
- * @param dpy_d The y component of the sampled pressure gradient.
- * @param dpz_d The z component of the sampled pressure gradient.
+ * Fortran wrapper for the Metal projection of the pressure gradient of the
+ * Duprat wall model.
+ * @param dpx_d The x component of the filtered pressure gradient.
+ * @param dpy_d The y component of the filtered pressure gradient.
+ * @param dpz_d The z component of the filtered pressure gradient.
  * @param u_d The x component of the sampled velocity.
  * @param v_d The y component of the sampled velocity.
  * @param w_d The z component of the sampled velocity.
@@ -121,18 +121,18 @@ void metal_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
  * @param nu_d The kinematic viscosity at wall points.
  * @param rho_w_d The density at wall points.
  * @param h_d The wall-model sampling distances.
- * @param eps The filter weight of the current gradient.
- * @param dpds_d The filtered pressure gradient, updated in place.
+ * @param stokes_limit Whether to limit the gradient to the Stokes bound.
+ * @param dpds_d The pressure gradient along the flow direction.
  * @param n_nodes The number of wall points.
  */
 void metal_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
                               void *v_d, void *w_d, void *n_x_d, void *n_y_d,
                               void *n_z_d, void *nu_d, void *rho_w_d, void *h_d,
-                              real *eps, void *dpds_d, int *n_nodes) {
+                              int *stokes_limit, void *dpds_d, int *n_nodes) {
   if (*n_nodes < 1)
     return;
 
-  const real eps_r = *eps;
+  const int stokes_limit_r = *stokes_limit;
   const int n_nodes_r = *n_nodes;
 
   neko_metal_dispatch_1d(
@@ -150,7 +150,7 @@ void metal_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
         [enc setBuffer:(__bridge id<MTLBuffer>)nu_d offset:0 atIndex:9];
         [enc setBuffer:(__bridge id<MTLBuffer>)rho_w_d offset:0 atIndex:10];
         [enc setBuffer:(__bridge id<MTLBuffer>)h_d offset:0 atIndex:11];
-        [enc setBytes:&eps_r length:sizeof(real) atIndex:12];
+        [enc setBytes:&stokes_limit_r length:sizeof(int) atIndex:12];
         [enc setBuffer:(__bridge id<MTLBuffer>)dpds_d offset:0 atIndex:13];
         [enc setBytes:&n_nodes_r length:sizeof(int) atIndex:14];
       },

@@ -18,7 +18,9 @@ module test_duprat
   ! Reference values, computed independently with SciPy: U* by adaptive
   ! quadrature of Eq. (5) of Duprat et al. (2011), and u_tau by solving
   ! u = u_tau_p U*(h u_tau_p / nu) with brentq. Default constants
-  ! kappa = 0.41, beta = 0.78, A = 17.
+  ! kappa = 0.41, beta = 0.78, A = 17. Under an adverse gradient, the branch
+  ! with reversed wall shear stress is used when the separation profile,
+  ! alpha = 0, exceeds the sampled velocity.
   ! Zero pressure gradient, u = 1, h = 0.05, nu = 1e-4
   real(kind=rp), parameter :: UTAU_ZPG = 7.07651223726671053e-02_rp
   ! Adverse gradient dp/ds = 1, u = 1, h = 0.05, nu = 1e-4
@@ -36,6 +38,17 @@ module test_duprat
   ! kappa = 0.40, beta = 0.7, A = 20, dp/ds = 1, u = 1, h = 0.05, nu = 1e-4
   real(kind=rp), parameter :: UTAU_CUSTOM = 5.78992938210663305e-02_rp
   real(kind=rp), parameter :: ALPHA_CUSTOM = 6.08765671723502821e-01_rp
+  ! Reversed wall shear stress, dp/ds = 10, u = 0.1, h = 0.05, nu = 1e-4,
+  ! where the separation profile gives u = 1.39 at the sampling point
+  real(kind=rp), parameter :: UTAU_REV = 2.16429977179458027e-01_rp
+  real(kind=rp), parameter :: ALPHA_REV = 8.24073547176972676e-01_rp
+  ! Close to separation, dp/ds = 0.5, h = 0.03, nu = 1e-4, where the
+  ! separation profile gives u = 0.2425: reversed for u = 0.24, attached for
+  ! u = 0.245
+  real(kind=rp), parameter :: UTAU_SEP_REV = 5.86134660668170913e-03_rp
+  real(kind=rp), parameter :: ALPHA_SEP_REV = 2.46883214103555196e-02_rp
+  real(kind=rp), parameter :: UTAU_SEP_ATT = 5.72722076270732253e-03_rp
+  real(kind=rp), parameter :: ALPHA_SEP_ATT = 2.35977157198659047e-02_rp
 
 contains
 
@@ -63,28 +76,34 @@ contains
 
   !> Verify the quadrature of the dimensionless velocity U*(y*) against
   !! reference values, without and with adverse and favourable pressure
-  !! gradients.
+  !! gradients, and with reversed wall shear stress.
   @test
   subroutine test_u_star_reference_values(this)
     class(test_duprat_case), intent(inout) :: this
-    integer, parameter :: n = 6
-    real(kind=rp) :: ys(n), alpha(n), sp(n), ref(n), us
+    integer, parameter :: n = 8
+    real(kind=rp) :: ys(n), alpha(n), sp(n), st(n), ref(n), us
     integer :: i
 
-    ys = [0.5_rp, 30.0_rp, 500.0_rp, 100.0_rp, 100.0_rp, 50.0_rp]
-    alpha = [1.0_rp, 1.0_rp, 1.0_rp, 0.5_rp, 0.5_rp, 0.05_rp]
-    sp = [1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, -1.0_rp, 1.0_rp]
+    ys = [0.5_rp, 30.0_rp, 500.0_rp, 100.0_rp, 100.0_rp, 50.0_rp, 50.0_rp, &
+         5.0_rp]
+    alpha = [1.0_rp, 1.0_rp, 1.0_rp, 0.5_rp, 0.5_rp, 0.05_rp, 0.05_rp, &
+         0.3_rp]
+    sp = [1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, -1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp]
+    st = [1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, -1.0_rp, -1.0_rp]
     ref = [4.99980662838976408e-01_rp, 1.36110062283495665e+01_rp, &
          2.06940211682639479e+01_rp, 1.61004369720788532e+01_rp, &
-         -1.09598360104115997e+01_rp, 1.36630154009183826e+01_rp]
+         -1.09598360104115997e+01_rp, 1.36630154009183826e+01_rp, &
+         1.33482500444494789e+01_rp, 1.98393572532956508e+00_rp]
 
     do i = 1, n
-       us = duprat_u_star(ys(i), alpha(i), sp(i), 0.41_rp, 0.78_rp, 17.0_rp)
+       us = duprat_u_star(ys(i), alpha(i), sp(i), st(i), 0.41_rp, 0.78_rp, &
+            17.0_rp)
        @assertEqual(ref(i), us, tolerance = tol() * abs(ref(i)))
     end do
 
     ! U* vanishes at the wall
-    us = duprat_u_star(0.0_rp, 1.0_rp, 1.0_rp, 0.41_rp, 0.78_rp, 17.0_rp)
+    us = duprat_u_star(0.0_rp, 1.0_rp, 1.0_rp, 1.0_rp, 0.41_rp, 0.78_rp, &
+         17.0_rp)
     @assertEqual(0.0_rp, us)
   end subroutine test_u_star_reference_values
 
@@ -237,83 +256,107 @@ contains
     @assertEqual(1.0_rp, alpha)
   end subroutine test_no_parallel_velocity
 
-  !> Verify that the stress vanishes when the adverse pressure gradient
-  !! alone accounts for the sampled velocity, i.e. when the residual has no
-  !! root with u_tau > 0.
+  !> Verify the branch with reversed wall shear stress, sign(tau_w) = -1
+  !! in Eq. (5), against reference values. Where the sampled velocity is
+  !! smaller than the separation profile driven by the adverse gradient, the
+  !! near-wall flow is reversed and the stress points along the sampled
+  !! velocity. Node 2 checks the direction and the density scaling, nodes 3
+  !! and 4 that the stress is continuous at the separation point.
   @test
-  subroutine test_vanishing_shear_stress(this)
+  subroutine test_reversed_wall_stress(this)
     class(test_duprat_case), intent(inout) :: this
-    real(kind=rp), dimension(1) :: u, v, w, n_x, n_y, n_z, nu, rho, h, dpds
-    real(kind=rp), dimension(1) :: tau_x, tau_y, tau_z, alpha
+    integer, parameter :: n = 4
+    real(kind=rp), dimension(n) :: u, v, w, n_x, n_y, n_z, nu, rho, h, dpds
+    real(kind=rp), dimension(n) :: tau_x, tau_y, tau_z, alpha
+    real(kind=rp) :: scale
 
-    ! u_p = 0.1 equals the sampled velocity, while u_p U*(h u_p / nu) is
-    ! about 2.7 even for alpha = 0.
-    u = 0.1_rp
+    ! Node 2: velocity along -z, rho = 1.2 and dp/ds = 12 give the same
+    ! u_p as node 1, hence the same u_tau.
+    u = [0.1_rp, 0.0_rp, 0.24_rp, 0.245_rp]
     v = 0.0_rp
-    w = 0.0_rp
+    w = [0.0_rp, -0.1_rp, 0.0_rp, 0.0_rp]
     n_x = 0.0_rp
     n_y = 1.0_rp
     n_z = 0.0_rp
     nu = 1.0e-4_rp
-    rho = 1.0_rp
-    h = 0.05_rp
-    dpds = 10.0_rp
+    rho = [1.0_rp, 1.2_rp, 1.0_rp, 1.0_rp]
+    h = [0.05_rp, 0.05_rp, 0.03_rp, 0.03_rp]
+    dpds = [10.0_rp, 12.0_rp, 0.5_rp, 0.5_rp]
     tau_x = 0.0_rp
-    tau_y = 0.0_rp
-    tau_z = 0.0_rp
-    alpha = 1.0_rp
-
-    call duprat_compute_cpu(u, v, w, n_x, n_y, n_z, nu, rho, h, dpds, &
-         tau_x, tau_y, tau_z, alpha, 1, 0.41_rp, 0.78_rp, 17.0_rp, 1)
-
-    @assertLessThanOrEqual(abs(tau_x(1)), 2.0_rp * NEKO_EPS * u(1)**2)
-    @assertEqual(0.0_rp, tau_y(1))
-    @assertEqual(0.0_rp, tau_z(1))
-    @assertLessThanOrEqual(alpha(1), 2.0_rp * NEKO_EPS)
-  end subroutine test_vanishing_shear_stress
-
-  !> Verify that after the first time step the previous stress is only an
-  !! initial guess, and the result does not depend on it.
-  @test
-  subroutine test_previous_stress_as_guess(this)
-    class(test_duprat_case), intent(inout) :: this
-    real(kind=rp), dimension(2) :: u, v, w, n_x, n_y, n_z, nu, rho, h, dpds
-    real(kind=rp), dimension(2) :: tau_x, tau_y, tau_z, alpha
-
-    u = 1.0_rp
-    v = 0.0_rp
-    w = 0.0_rp
-    n_x = 0.0_rp
-    n_y = 1.0_rp
-    n_z = 0.0_rp
-    nu = 1.0e-4_rp
-    rho = 1.0_rp
-    h = 0.05_rp
-    dpds = 1.0_rp
-    ! Guesses far below and far above the solution
-    tau_x = [-1.0e-5_rp, -1.0e-1_rp]
     tau_y = 0.0_rp
     tau_z = 0.0_rp
     alpha = 0.0_rp
 
     call duprat_compute_cpu(u, v, w, n_x, n_y, n_z, nu, rho, h, dpds, &
-         tau_x, tau_y, tau_z, alpha, 2, 0.41_rp, 0.78_rp, 17.0_rp, 5)
+         tau_x, tau_y, tau_z, alpha, n, 0.41_rp, 0.78_rp, 17.0_rp, 1)
+
+    ! Reversed: the stress points along the sampled velocity
+    scale = UTAU_REV**2
+    @assertEqual(scale, tau_x(1), tolerance = tol() * scale)
+    @assertEqual(0.0_rp, tau_z(1))
+    @assertEqual(ALPHA_REV, alpha(1), tolerance = tol() * ALPHA_REV)
+    @assertEqual(0.0_rp, tau_x(2))
+    @assertEqual(-1.2_rp * scale, tau_z(2), tolerance = tol() * scale)
+    @assertEqual(ALPHA_REV, alpha(2), tolerance = tol() * ALPHA_REV)
+    @assertEqual(0.0_rp, tau_y)
+
+    ! Just below and above the separation velocity, the stress is small and
+    ! changes sign
+    scale = UTAU_SEP_REV**2
+    @assertEqual(scale, tau_x(3), tolerance = tol() * scale)
+    @assertEqual(ALPHA_SEP_REV, alpha(3), tolerance = tol() * ALPHA_SEP_REV)
+    scale = UTAU_SEP_ATT**2
+    @assertEqual(-scale, tau_x(4), tolerance = tol() * scale)
+    @assertEqual(ALPHA_SEP_ATT, alpha(4), tolerance = tol() * ALPHA_SEP_ATT)
+  end subroutine test_reversed_wall_stress
+
+  !> Verify that after the first time step the previous stress is only an
+  !! initial guess, and the result does not depend on it, also on the
+  !! branch with reversed wall shear stress.
+  @test
+  subroutine test_previous_stress_as_guess(this)
+    class(test_duprat_case), intent(inout) :: this
+    integer, parameter :: n = 4
+    real(kind=rp), dimension(n) :: u, v, w, n_x, n_y, n_z, nu, rho, h, dpds
+    real(kind=rp), dimension(n) :: tau_x, tau_y, tau_z, alpha
+
+    u = [1.0_rp, 1.0_rp, 0.1_rp, 0.1_rp]
+    v = 0.0_rp
+    w = 0.0_rp
+    n_x = 0.0_rp
+    n_y = 1.0_rp
+    n_z = 0.0_rp
+    nu = 1.0e-4_rp
+    rho = 1.0_rp
+    h = 0.05_rp
+    dpds = [1.0_rp, 1.0_rp, 10.0_rp, 10.0_rp]
+    ! Guesses far below and far above the solution, with either sign
+    tau_x = [-1.0e-5_rp, -1.0e-1_rp, -1.0e-5_rp, 1.0_rp]
+    tau_y = 0.0_rp
+    tau_z = 0.0_rp
+    alpha = 0.0_rp
+
+    call duprat_compute_cpu(u, v, w, n_x, n_y, n_z, nu, rho, h, dpds, &
+         tau_x, tau_y, tau_z, alpha, n, 0.41_rp, 0.78_rp, 17.0_rp, 5)
 
     @assertEqual(-UTAU_APG**2, tau_x(1), tolerance = tol() * UTAU_APG**2)
     @assertEqual(-UTAU_APG**2, tau_x(2), tolerance = tol() * UTAU_APG**2)
+    @assertEqual(UTAU_REV**2, tau_x(3), tolerance = tol() * UTAU_REV**2)
+    @assertEqual(UTAU_REV**2, tau_x(4), tolerance = tol() * UTAU_REV**2)
   end subroutine test_previous_stress_as_guess
 
-  !> Verify the update of the filtered pressure gradient: the projection on
-  !! the wall-parallel flow direction, the exponential moving average, the
-  !! limit to the Stokes bound, and that nodes without a flow direction keep
-  !! their previous value.
+  !> Verify the projection of the filtered pressure gradient on the
+  !! wall-parallel flow direction, without and with the limit to the Stokes
+  !! bound, and that nodes without a flow direction keep their previous
+  !! value.
   @test
   subroutine test_update_dpds(this)
     class(test_duprat_case), intent(inout) :: this
     integer, parameter :: n = 3
     real(kind=rp), dimension(n) :: dpx, dpy, dpz, u, v, w, n_x, n_y, n_z
     real(kind=rp), dimension(n) :: nu, rho, h, dpds, ref
-    real(kind=rp) :: eps
+    logical :: stokes_limit
+    integer :: k
 
     ! Node 1: wall normal z, wall-parallel velocity (3, 4, 0), so
     ! dp/ds = (0.2 * 3 - 0.1 * 4) / 5 = 0.04, below the bound.
@@ -332,17 +375,23 @@ contains
     nu = 1.0e-3_rp
     rho = [1.0_rp, 1.2_rp, 1.0_rp]
     h = 0.1_rp
-    dpds = [0.1_rp, 2.0_rp, 0.3_rp]
-    eps = 0.25_rp
-    ! (1 - eps) dpds + eps dp/ds
-    ref = [0.085_rp, -1.85410196624968382_rp, 0.3_rp]
 
-    call duprat_update_dpds_cpu(dpx, dpy, dpz, u, v, w, n_x, n_y, n_z, &
-         nu, rho, h, eps, dpds, n)
+    do k = 1, 2
+       stokes_limit = k .eq. 2
+       if (stokes_limit) then
+          ref = [0.04_rp, -1.34164078649987406e+01_rp, 0.3_rp]
+       else
+          ref = [0.04_rp, -100.0_rp, 0.3_rp]
+       end if
+       dpds = [0.1_rp, 2.0_rp, 0.3_rp]
 
-    @assertEqual(ref(1), dpds(1), tolerance = tol() * abs(ref(1)))
-    @assertEqual(ref(2), dpds(2), tolerance = tol() * abs(ref(2)))
-    @assertEqual(ref(3), dpds(3))
+       call duprat_update_dpds_cpu(dpx, dpy, dpz, u, v, w, n_x, n_y, n_z, &
+            nu, rho, h, stokes_limit, dpds, n)
+
+       @assertEqual(ref(1), dpds(1), tolerance = tol() * abs(ref(1)))
+       @assertEqual(ref(2), dpds(2), tolerance = tol() * abs(ref(2)))
+       @assertEqual(ref(3), dpds(3))
+    end do
   end subroutine test_update_dpds
 
 end module test_duprat

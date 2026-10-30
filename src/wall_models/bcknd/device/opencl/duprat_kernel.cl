@@ -36,18 +36,22 @@
 
 /**
  * Dimensionless velocity U*(y*) of the model of Duprat et al. (2011).
- * Integrates dU* / dy* = (s_p (1 - alpha)^(3/2) y* + alpha) / (1 + nu_t / nu),
+ * Integrates
+ * dU* / dy* = (s_p (1 - alpha)^(3/2) y* + s_tau alpha) / (1 + nu_t / nu),
  * Eq. (5), with the eddy viscosity of Eq. (6), using a composite 12 x 5-point
  * Gauss-Legendre rule in the stretched coordinate s = ln(1 + y*).
  * @param ys The upper integration limit y*.
  * @param alpha The ratio u_tau^2 / u_tau_p^2.
  * @param sp The sign of the pressure gradient relative to the flow.
+ * @param st The sign of the wall shear stress relative to the flow, -1
+ * for reversed flow at the wall.
  * @param kappa The von Karman coefficient.
  * @param beta The exponent of the pressure-gradient term.
  * @param A The damping constant.
  */
 inline real duprat_u_star(const real ys, const real alpha, const real sp,
-                          const real kappa, const real beta, const real A) {
+                          const real st, const real kappa, const real beta,
+                          const real A) {
   const real gl_x[5] = {(real)0.0469100770306680, (real)0.2307653449471585,
                         (real)0.5, (real)0.7692346550528415,
                         (real)0.9530899229693320};
@@ -74,22 +78,27 @@ inline real duprat_u_star(const real ys, const real alpha, const real sp,
       const real nut =
           kappa * eta * pow(alpha + eta * apg, beta) * edamp * edamp;
       /* dU^+ / dy^+ times the Jacobian d(eta) / ds = 1 + eta */
-      us += gl_w[j] * ds * (sp * apg * eta + alpha) / (one + nut) * (one + eta);
+      us += gl_w[j] * ds * (sp * apg * eta + st * alpha) / (one + nut) *
+            (one + eta);
     }
   }
   return us;
 }
 
 /**
- * Residual f(utau) = u_tau_p U*(y*) - u of the model of Duprat et al.
+ * Residual f(utau) = s_tau (u_tau_p U*(y*) - u) of the model of Duprat et
+ * al. The factor s_tau makes f grow with utau for large utau on both
+ * branches.
  */
 inline real duprat_residual(const real utau, const real u, const real y,
                             const real nu, const real up, const real sp,
-                            const real kappa, const real beta, const real A) {
+                            const real st, const real kappa, const real beta,
+                            const real A) {
   const real utp = sqrt(utau * utau + up * up);
   /* alpha without the square root, so that it cannot exceed 1 */
   const real alpha = utau * utau / (utau * utau + up * up);
-  return utp * duprat_u_star(y * utp / nu, alpha, sp, kappa, beta, A) - u;
+  return st *
+         (utp * duprat_u_star(y * utp / nu, alpha, sp, st, kappa, beta, A) - u);
 }
 
 /**
@@ -100,7 +109,8 @@ inline real duprat_residual(const real utau, const real u, const real y,
  */
 inline real duprat_solve(const real u, const real y, const real guess,
                          const real nu, const real up, const real sp,
-                         const real kappa, const real beta, const real A) {
+                         const real st, const real kappa, const real beta,
+                         const real A) {
   const int maxiter = 100;
   const real eps =
       (sizeof(real) == sizeof(float)) ? (real)FLT_EPSILON : (real)DBL_EPSILON;
@@ -111,15 +121,15 @@ inline real duprat_solve(const real u, const real y, const real guess,
   /* Bracket the root, f(lo) < 0 < f(hi) */
   real lo = (guess > tiny) ? guess : tiny;
   real hi = lo;
-  real f_lo = duprat_residual(lo, u, y, nu, up, sp, kappa, beta, A);
+  real f_lo = duprat_residual(lo, u, y, nu, up, sp, st, kappa, beta, A);
   real f_hi = f_lo;
   for (int k = 0; k < maxiter && f_hi <= (real)0.0; ++k) {
     hi = (real)2.0 * hi;
-    f_hi = duprat_residual(hi, u, y, nu, up, sp, kappa, beta, A);
+    f_hi = duprat_residual(hi, u, y, nu, up, sp, st, kappa, beta, A);
   }
   for (int k = 0; k < maxiter && f_lo >= (real)0.0 && lo > tiny; ++k) {
     lo = ((real)0.5 * lo > tiny) ? (real)0.5 * lo : tiny;
-    f_lo = duprat_residual(lo, u, y, nu, up, sp, kappa, beta, A);
+    f_lo = duprat_residual(lo, u, y, nu, up, sp, st, kappa, beta, A);
   }
 
   /* No sign change down to utau ~ 0: the shear stress vanishes */
@@ -129,7 +139,7 @@ inline real duprat_solve(const real u, const real y, const real guess,
   real utau = (real)0.5 * (lo + hi);
   if (guess > lo && guess < hi)
     utau = guess;
-  real f = duprat_residual(utau, u, y, nu, up, sp, kappa, beta, A);
+  real f = duprat_residual(utau, u, y, nu, up, sp, st, kappa, beta, A);
 
   for (int k = 0; k < maxiter; ++k) {
     /* Shrink the bracket */
@@ -142,7 +152,8 @@ inline real duprat_solve(const real u, const real y, const real guess,
     /* Newton step, or bisection if it leaves the bracket */
     const real delta = sqrt(eps) * utau;
     const real df =
-        (duprat_residual(utau + delta, u, y, nu, up, sp, kappa, beta, A) - f) /
+        (duprat_residual(utau + delta, u, y, nu, up, sp, st, kappa, beta, A) -
+         f) /
         delta;
     real step = f / df;
     if (df <= (real)0.0 || utau - step <= lo || utau - step >= hi) {
@@ -152,7 +163,7 @@ inline real duprat_solve(const real u, const real y, const real guess,
 
     if (fabs(step) < tol * utau || (hi - lo) < tol * utau)
       break;
-    f = duprat_residual(utau, u, y, nu, up, sp, kappa, beta, A);
+    f = duprat_residual(utau, u, y, nu, up, sp, st, kappa, beta, A);
   }
   return utau;
 }
@@ -235,6 +246,18 @@ __kernel void duprat_compute_kernel(__global const real *__restrict__ u_d,
     const real up = pow(nu * fabs(dp) / rho, (real)1.0 / (real)3.0);
     const real sp = copysign((real)1.0, dp);
 
+    /* Sign of the wall shear stress relative to the flow, sign(tau_w) in
+       Eq. (5). At the separation point, alpha = 0, an adverse gradient
+       alone gives the velocity u_p U*(h u_p / nu). A smaller sampled
+       velocity means reversed flow below the sampling point. */
+    real st = (real)1.0;
+    if (sp > (real)0.0 && up > (real)0.0) {
+      const real u_sep =
+          up * duprat_u_star(h * up / nu, (real)0.0, sp, st, kappa, beta, A);
+      if (u_sep > magu)
+        st = -(real)1.0;
+    }
+
     /* Get initial guess for the Newton solver */
     real guess = tau_x_d[i] * tau_x_d[i] + tau_y_d[i] * tau_y_d[i] +
                  tau_z_d[i] * tau_z_d[i];
@@ -244,12 +267,14 @@ __kernel void duprat_compute_kernel(__global const real *__restrict__ u_d,
       guess = sqrt(sqrt(guess) / rho);
     }
 
-    const real utau = duprat_solve(magu, h, guess, nu, up, sp, kappa, beta, A);
+    const real utau =
+        duprat_solve(magu, h, guess, nu, up, sp, st, kappa, beta, A);
 
-    /* Distribute according to the velocity vector */
-    tau_x_d[i] = -rho * utau * utau * ui / magu;
-    tau_y_d[i] = -rho * utau * utau * vi / magu;
-    tau_z_d[i] = -rho * utau * utau * wi / magu;
+    /* Distribute according to the velocity vector. The stress opposes the
+       near-wall flow, which is reversed for st = -1. */
+    tau_x_d[i] = -st * rho * utau * utau * ui / magu;
+    tau_y_d[i] = -st * rho * utau * utau * vi / magu;
+    tau_z_d[i] = -st * rho * utau * utau * wi / magu;
 
     /* alpha = u_tau^2 / u_tau_p^2, 1 without pressure gradient */
     alpha_d[i] =
@@ -258,10 +283,11 @@ __kernel void duprat_compute_kernel(__global const real *__restrict__ u_d,
 }
 
 /**
- * OpenCL kernel updating the filtered wall-tangential pressure gradient.
- * @param dpx_d The x component of the sampled pressure gradient.
- * @param dpy_d The y component of the sampled pressure gradient.
- * @param dpz_d The z component of the sampled pressure gradient.
+ * OpenCL kernel projecting the filtered pressure gradient on the flow
+ * direction, optionally limited to the Stokes bound.
+ * @param dpx_d The x component of the filtered pressure gradient.
+ * @param dpy_d The y component of the filtered pressure gradient.
+ * @param dpz_d The z component of the filtered pressure gradient.
  * @param u_d The x component of the sampled velocity.
  * @param v_d The y component of the sampled velocity.
  * @param w_d The z component of the sampled velocity.
@@ -271,25 +297,25 @@ __kernel void duprat_compute_kernel(__global const real *__restrict__ u_d,
  * @param nu_d The kinematic viscosity at wall points.
  * @param rho_w_d The density at wall points.
  * @param h_d The wall-model sampling distances.
- * @param eps The filter weight of the current gradient.
- * @param dpds_d The filtered pressure gradient, updated in place.
+ * @param stokes_limit Whether to limit the gradient to the Stokes bound.
+ * @param dpds_d The pressure gradient along the flow direction. Nodes
+ * without a wall-parallel velocity keep their previous value.
  * @param n_nodes The number of wall points.
  */
-__kernel void
-duprat_update_dpds_kernel(__global const real *__restrict__ dpx_d,
-                          __global const real *__restrict__ dpy_d,
-                          __global const real *__restrict__ dpz_d,
-                          __global const real *__restrict__ u_d,
-                          __global const real *__restrict__ v_d,
-                          __global const real *__restrict__ w_d,
-                          __global const real *__restrict__ n_x_d,
-                          __global const real *__restrict__ n_y_d,
-                          __global const real *__restrict__ n_z_d,
-                          __global const real *__restrict__ nu_d,
-                          __global const real *__restrict__ rho_w_d,
-                          __global const real *__restrict__ h_d, const real eps,
-                          __global real *__restrict__ dpds_d,
-                          const int n_nodes) {
+__kernel void duprat_update_dpds_kernel(
+    __global const real *__restrict__ dpx_d,
+    __global const real *__restrict__ dpy_d,
+    __global const real *__restrict__ dpz_d,
+    __global const real *__restrict__ u_d,
+    __global const real *__restrict__ v_d,
+    __global const real *__restrict__ w_d,
+    __global const real *__restrict__ n_x_d,
+    __global const real *__restrict__ n_y_d,
+    __global const real *__restrict__ n_z_d,
+    __global const real *__restrict__ nu_d,
+    __global const real *__restrict__ rho_w_d,
+    __global const real *__restrict__ h_d, const int stokes_limit,
+    __global real *__restrict__ dpds_d, const int n_nodes) {
   const int idx = get_global_id(0);
   const int str = get_global_size(0);
   const real eps_mach =
@@ -304,7 +330,7 @@ duprat_update_dpds_kernel(__global const real *__restrict__ dpx_d,
     const real wi = w_d[i] - normu * n_z_d[i];
     const real magu = sqrt(ui * ui + vi * vi + wi * wi);
 
-    /* Without a flow direction, keep the previous filtered value */
+    /* Without a flow direction, keep the previous value */
     if (magu <= eps_mach) {
       continue;
     }
@@ -313,13 +339,14 @@ duprat_update_dpds_kernel(__global const real *__restrict__ dpx_d,
     real dp = (dpx_d[i] * ui + dpy_d[i] * vi + dpz_d[i] * wi) / magu;
 
     /* Limit to the Stokes bound, u_p <= sqrt(u nu / h) */
-    const real dp_max =
-        rho_w_d[i] / nu_d[i] * pow(magu * nu_d[i] / h_d[i], (real)1.5);
-    if (fabs(dp) > dp_max)
-      dp = copysign(dp_max, dp);
+    if (stokes_limit) {
+      const real dp_max =
+          rho_w_d[i] / nu_d[i] * pow(magu * nu_d[i] / h_d[i], (real)1.5);
+      if (fabs(dp) > dp_max)
+        dp = copysign(dp_max, dp);
+    }
 
-    /* Exponential moving average with weight eps = 1 - exp(-dt / T) */
-    dpds_d[i] = ((real)1.0 - eps) * dpds_d[i] + eps * dp;
+    dpds_d[i] = dp;
   }
 }
 

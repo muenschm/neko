@@ -412,8 +412,14 @@ A more detailed description of each boundary condition is provided below.
      and a mixing-length eddy viscosity that depends on
      \f$ \alpha = u_\tau^2 / u_{\tau p}^2 \f$. The velocity profile is
      obtained by integrating the thin-boundary-layer equation across the wall
-     layer. It requires specifying `kappa`, and accepts the optional constants
-     `beta` and `A`, which default to the calibrated values `0.78` and `17`.
+     layer. Under an adverse gradient, the wall shear stress changes sign when
+     the sampled velocity is smaller than the velocity the gradient alone
+     produces at the sampling point (\f$ \alpha = 0 \f$, the separation
+     point). The near-wall flow is then reversed and the stress points along
+     the sampled velocity, as given by the \f$ \mathrm{sign}(\tau_w) \f$
+     term of the model. It requires specifying `kappa`, and accepts the
+     optional constants `beta` and `A`, which default to the calibrated values
+     `0.78` and `17`.
      The pressure gradient \f$ \partial p / \partial s \f$, taken along the
      local flow direction and positive for an adverse gradient, is set with
      the optional `pressure_gradient` object:
@@ -428,15 +434,19 @@ A more detailed description of each boundary condition is provided below.
        \mathbf{G}_{filt}^{n-1} + \epsilon \nabla p^{n} \f$ with
        \f$ \epsilon = 1 - e^{-\Delta t / T} \f$. The filtered gradient is
        then projected on the direction of the current sampled wall-parallel
-       velocity, which gives \f$ \partial p / \partial s \f$, and limited
-       such that \f$ u_p \f$ does not exceed the friction velocity of a
-       laminar profile through the sampled velocity,
+       velocity, which gives \f$ \partial p / \partial s \f$. Filtering the
+       vector before the projection keeps the gradient where the flow
+       direction changes often, as in separated regions. The filter time
+       constant \f$ T \f$ is given by the required `filter_time`, where `0`
+       disables the filtering. The optional `start_time` (default `0`) delays
+       the use of the local gradient; before, the gradient is zero. The
+       optional `stokes_limit` (default `false`) limits the gradient such that
+       \f$ u_p \f$ does not exceed the friction velocity of a laminar profile
+       through the sampled velocity,
        \f$ |\partial p / \partial s| \le (\rho / \nu) (u \nu / h)^{3/2} \f$.
-       Filtering the vector before the projection keeps the gradient where
-       the flow direction changes often, as in separated regions. The filter
-       time constant \f$ T \f$ is given by the required `filter_time`, where
-       `0` disables the filtering. The optional `start_time` (default `0`)
-       delays the use of the local gradient; before, the gradient is zero.
+       This limit is not part of the model of Duprat et al. It reduces the
+       gradient wherever the sampled velocity is small, e.g. in separated
+       regions.
        The filtered gradient starts from zero, so that it enters gradually
        over about one `filter_time`. It is not stored in checkpoints and
        restarts from zero after a restart.

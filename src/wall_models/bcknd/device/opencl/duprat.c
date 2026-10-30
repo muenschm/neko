@@ -118,11 +118,11 @@ void opencl_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
 }
 
 /**
- * Fortran wrapper for the OpenCL pressure-gradient update of the Duprat wall
- * model.
- * @param dpx_d The x component of the sampled pressure gradient.
- * @param dpy_d The y component of the sampled pressure gradient.
- * @param dpz_d The z component of the sampled pressure gradient.
+ * Fortran wrapper for the OpenCL projection of the pressure gradient of the
+ * Duprat wall model.
+ * @param dpx_d The x component of the filtered pressure gradient.
+ * @param dpy_d The y component of the filtered pressure gradient.
+ * @param dpz_d The z component of the filtered pressure gradient.
  * @param u_d The x component of the sampled velocity.
  * @param v_d The y component of the sampled velocity.
  * @param w_d The z component of the sampled velocity.
@@ -132,14 +132,14 @@ void opencl_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
  * @param nu_d The kinematic viscosity at wall points.
  * @param rho_w_d The density at wall points.
  * @param h_d The wall-model sampling distances.
- * @param eps The filter weight of the current gradient.
- * @param dpds_d The filtered pressure gradient, updated in place.
+ * @param stokes_limit Whether to limit the gradient to the Stokes bound.
+ * @param dpds_d The pressure gradient along the flow direction.
  * @param n_nodes The number of wall points.
  */
 void opencl_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
                                void *v_d, void *w_d, void *n_x_d, void *n_y_d,
                                void *n_z_d, void *nu_d, void *rho_w_d,
-                               void *h_d, real *eps, void *dpds_d,
+                               void *h_d, int *stokes_limit, void *dpds_d,
                                int *n_nodes) {
   cl_int err;
 
@@ -166,7 +166,7 @@ void opencl_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
   CL_CHECK(clSetKernelArg(kernel, 9, sizeof(cl_mem), (void *)&nu_d));
   CL_CHECK(clSetKernelArg(kernel, 10, sizeof(cl_mem), (void *)&rho_w_d));
   CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_mem), (void *)&h_d));
-  CL_CHECK(clSetKernelArg(kernel, 12, sizeof(real), eps));
+  CL_CHECK(clSetKernelArg(kernel, 12, sizeof(int), stokes_limit));
   CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_mem), (void *)&dpds_d));
   CL_CHECK(clSetKernelArg(kernel, 14, sizeof(int), n_nodes));
 

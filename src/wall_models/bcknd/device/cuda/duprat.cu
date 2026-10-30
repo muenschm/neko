@@ -80,11 +80,11 @@ void cuda_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
 }
 
 /**
- * Fortran wrapper for the CUDA pressure-gradient update of the Duprat
- * wall model.
- * @param dpx_d The x component of the sampled pressure gradient.
- * @param dpy_d The y component of the sampled pressure gradient.
- * @param dpz_d The z component of the sampled pressure gradient.
+ * Fortran wrapper for the CUDA projection of the pressure gradient of the
+ * Duprat wall model.
+ * @param dpx_d The x component of the filtered pressure gradient.
+ * @param dpy_d The y component of the filtered pressure gradient.
+ * @param dpz_d The z component of the filtered pressure gradient.
  * @param u_d The x component of the sampled velocity.
  * @param v_d The y component of the sampled velocity.
  * @param w_d The z component of the sampled velocity.
@@ -94,14 +94,14 @@ void cuda_duprat_compute(void *u_d, void *v_d, void *w_d, void *n_x_d,
  * @param nu_d The kinematic viscosity at wall points.
  * @param rho_w_d The density at wall points.
  * @param h_d The wall-model sampling distances.
- * @param eps The filter weight of the current gradient.
- * @param dpds_d The filtered pressure gradient, updated in place.
+ * @param stokes_limit Whether to limit the gradient to the Stokes bound.
+ * @param dpds_d The pressure gradient along the flow direction.
  * @param n_nodes The number of wall points.
  */
 void cuda_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
                              void *v_d, void *w_d, void *n_x_d, void *n_y_d,
                              void *n_z_d, void *nu_d, void *rho_w_d, void *h_d,
-                             real *eps, void *dpds_d, int *n_nodes) {
+                             int *stokes_limit, void *dpds_d, int *n_nodes) {
   const dim3 nthrds(256, 1, 1);
   const dim3 nblcks(((*n_nodes) + 256 - 1) / 256, 1, 1);
   const cudaStream_t stream = (cudaStream_t)glb_cmd_queue;
@@ -110,7 +110,7 @@ void cuda_duprat_update_dpds(void *dpx_d, void *dpy_d, void *dpz_d, void *u_d,
     duprat_update_dpds<real><<<nblcks, nthrds, 0, stream>>>(
         (real *)dpx_d, (real *)dpy_d, (real *)dpz_d, (real *)u_d, (real *)v_d,
         (real *)w_d, (real *)n_x_d, (real *)n_y_d, (real *)n_z_d, (real *)nu_d,
-        (real *)rho_w_d, (real *)h_d, *eps, (real *)dpds_d, *n_nodes);
+        (real *)rho_w_d, (real *)h_d, *stokes_limit, (real *)dpds_d, *n_nodes);
     CUDA_CHECK(cudaGetLastError());
   }
 }
