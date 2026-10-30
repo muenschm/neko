@@ -421,28 +421,30 @@ A more detailed description of each boundary condition is provided below.
        `pressure_gradient`, the gradient is zero and the model reduces to its
        equilibrium form.
      - `"type": "local"` evaluates it at every wall node from the pressure
-       field of the latest time step. The gradient is sampled at the same
-       points as the velocity (see `sampling` below) and projected on the
-       direction of the sampled wall-parallel velocity. It is limited such
-       that \f$ u_p \f$ does not exceed the friction velocity of a laminar
-       profile through the sampled velocity,
-       \f$ |\partial p / \partial s| \le (\rho / \nu) (u \nu / h)^{3/2} \f$,
-       and filtered in time with an exponential moving average,
-       \f$ (\partial p / \partial s)_{filt}^{n} = (1 - \epsilon)
-       (\partial p / \partial s)_{filt}^{n-1} + \epsilon
-       (\partial p / \partial s)^{n} \f$ with
-       \f$ \epsilon = 1 - e^{-\Delta t / T} \f$. The filter time constant
-       \f$ T \f$ is given by the required `filter_time`, where `0` disables
-       the filtering. The optional `start_time` (default `0`) delays the use
-       of the local gradient; before, the gradient is zero. The filtered
-       gradient starts from zero, so that it enters gradually over about one
-       `filter_time`. It is not stored in checkpoints and restarts from zero
-       after a restart.
+       field of the latest time step. The pressure gradient is averaged
+       across element boundaries, sampled at the same points as the velocity
+       (see `sampling` below) and filtered in time with an exponential moving
+       average, \f$ \mathbf{G}_{filt}^{n} = (1 - \epsilon)
+       \mathbf{G}_{filt}^{n-1} + \epsilon \nabla p^{n} \f$ with
+       \f$ \epsilon = 1 - e^{-\Delta t / T} \f$. The filtered gradient is
+       then projected on the direction of the current sampled wall-parallel
+       velocity, which gives \f$ \partial p / \partial s \f$, and limited
+       such that \f$ u_p \f$ does not exceed the friction velocity of a
+       laminar profile through the sampled velocity,
+       \f$ |\partial p / \partial s| \le (\rho / \nu) (u \nu / h)^{3/2} \f$.
+       Filtering the vector before the projection keeps the gradient where
+       the flow direction changes often, as in separated regions. The filter
+       time constant \f$ T \f$ is given by the required `filter_time`, where
+       `0` disables the filtering. The optional `start_time` (default `0`)
+       delays the use of the local gradient; before, the gradient is zero.
+       The filtered gradient starts from zero, so that it enters gradually
+       over about one `filter_time`. It is not stored in checkpoints and
+       restarts from zero after a restart.
 
      Note that in flows driven by a body force, such as a channel with a
      prescribed flow rate, the mean pressure gradient is not part of the
-     pressure field. The filtered \f$ \partial p / \partial s \f$ and
-     \f$ \alpha \f$ at the wall nodes are stored in the fields `duprat_dpds`
+     pressure field. The \f$ \partial p / \partial s \f$ used by the model
+     and \f$ \alpha \f$ at the wall nodes are stored in the fields `duprat_dpds`
      and `duprat_alpha` in the field registry, and can be written with the
      `field_writer` simulation component.
      ```json

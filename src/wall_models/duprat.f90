@@ -50,9 +50,11 @@ module duprat
   use operators, only : grad
   use field_math, only : field_invcol3
   use vector, only : vector_t
-  use math, only : masked_gather_copy_0, cfill
+  use vector_math, only : vector_cmult, vector_add2s2
+  use math, only : masked_gather_copy_0, cfill, col2
   use device_math, only : device_masked_gather_copy_0, &
-       device_masked_scatter_copy_0, device_cfill
+       device_masked_scatter_copy_0, device_cfill, device_col2
+  use gs_ops, only : GS_OP_ADD
   use scratch_registry, only : neko_scratch_registry
   use logger, only : LOG_SIZE, neko_log
   use utils, only : neko_error
@@ -95,8 +97,9 @@ module duprat
      type(vector_t) :: nu
      !> The fluid density at the boundary.
      type(vector_t) :: rho_w
-     !> The wall-tangential pressure gradient at the wall nodes, filtered in
-     !! time in the local mode.
+     !> The pressure gradient along the local flow direction at the wall
+     !! nodes, as used by the model. In the local mode it is the projection
+     !! of the filtered gradient vector on the current flow direction.
      type(vector_t) :: dpds
      !> The ratio alpha = u_tau^2 / u_tau_p^2 at the wall nodes.
      type(vector_t) :: alpha
@@ -104,6 +107,8 @@ module duprat
      type(vector_t) :: u_s, v_s, w_s
      !> Pressure gradient sampled away from the wall (local mode).
      type(vector_t) :: dpx_s, dpy_s, dpz_s
+     !> Sampled pressure gradient, filtered in time (local mode).
+     type(vector_t) :: dpx_f, dpy_f, dpz_f
      !> Registry field with dp/ds at the wall nodes, for output.
      type(field_t), pointer :: dpds_field => null()
      !> Registry field with alpha at the wall nodes, for output.
@@ -326,6 +331,12 @@ contains
        call this%dpx_s%init(this%n_nodes)
        call this%dpy_s%init(this%n_nodes)
        call this%dpz_s%init(this%n_nodes)
+       call this%dpx_f%init(this%n_nodes)
+       call this%dpy_f%init(this%n_nodes)
+       call this%dpz_f%init(this%n_nodes)
+       call duprat_fill(this%dpx_f, 0.0_rp)
+       call duprat_fill(this%dpy_f, 0.0_rp)
+       call duprat_fill(this%dpz_f, 0.0_rp)
     else
        call duprat_fill(this%dpds, this%dpds_constant)
     end if
@@ -392,6 +403,9 @@ contains
     call this%dpx_s%free()
     call this%dpy_s%free()
     call this%dpz_s%free()
+    call this%dpx_f%free()
+    call this%dpy_f%free()
+    call this%dpz_f%free()
     nullify(this%dpds_field)
     nullify(this%alpha_field)
     call this%u_s%free()
@@ -462,11 +476,24 @@ contains
   !! The wall model is evaluated at the beginning of a time step, before the
   !! pressure and velocity solves. The pressure field is therefore the one of
   !! the latest completed step, i.e. the same time level as the sampled
-  !! velocity. Its gradient is sampled at the same points as the velocity,
-  !! projected on the local flow direction and filtered in time with an
-  !! exponential moving average,
-  !! (dp/ds)_filt^n = (1 - eps) (dp/ds)_filt^(n-1) + eps (dp/ds)^n,
-  !! with eps = 1 - exp(-dt / filter_time); see `duprat_update_dpds_cpu`.
+  !! velocity.
+  !!
+  !! 1. The pressure gradient is computed element by element and averaged
+  !!    across element boundaries (gather-scatter and inverse multiplicity),
+  !!    since the derivative normal to an element face is two-valued in the
+  !!    C0 spectral-element basis. Without the average, wall nodes on element
+  !!    edges would see the one-sided gradient of a single element.
+  !! 2. The gradient vector is sampled at the same points as the velocity and
+  !!    filtered in time with an exponential moving average,
+  !!    G_filt^n = (1 - eps) G_filt^(n-1) + eps G^n,
+  !!    with eps = 1 - exp(-dt / filter_time).
+  !! 3. The filtered vector is projected on the current wall-parallel flow
+  !!    direction and limited to the Stokes bound; see
+  !!    `duprat_update_dpds_cpu`, which is called with eps = 1.
+  !!
+  !! Filtering the vector before the projection matters where the flow
+  !! direction changes often, as in separated regions: averaging the
+  !! projections instead would cancel the gradient there.
   !! The update is done once per time step. Before `start_time`, the
   !! filtered gradient stays zero.
   !! @param t The time value.
@@ -477,7 +504,7 @@ contains
     integer, intent(in) :: tstep
     type(field_t), pointer :: p, dpdx, dpdy, dpdz
     real(kind=rp) :: dt, eps
-    integer :: idx(3)
+    integer :: idx(3), n
 
     ! Update once per time step only
     if (tstep .eq. this%tstep_prev) return
@@ -509,28 +536,53 @@ contains
     call neko_scratch_registry%request_field(dpdy, idx(2), .false.)
     call neko_scratch_registry%request_field(dpdz, idx(3), .false.)
 
+    n = p%size()
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call grad(dpdx%x_d, dpdy%x_d, dpdz%x_d, p%x_d, this%coef)
     else
        call grad(dpdx%x, dpdy%x, dpdz%x, p%x, this%coef)
     end if
+
+    ! Average the gradient across element boundaries
+    call this%coef%gs_h%op(dpdx, GS_OP_ADD)
+    call this%coef%gs_h%op(dpdy, GS_OP_ADD)
+    call this%coef%gs_h%op(dpdz, GS_OP_ADD)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_col2(dpdx%x_d, this%coef%mult_d, n)
+       call device_col2(dpdy%x_d, this%coef%mult_d, n)
+       call device_col2(dpdz%x_d, this%coef%mult_d, n)
+    else
+       call col2(dpdx%x, this%coef%mult, n)
+       call col2(dpdy%x, this%coef%mult, n)
+       call col2(dpdz%x, this%coef%mult, n)
+    end if
+
     call this%sampler%sample(dpdx, this%dpx_s)
     call this%sampler%sample(dpdy, this%dpy_s)
     call this%sampler%sample(dpdz, this%dpz_s)
 
     call neko_scratch_registry%relinquish_field(idx)
 
+    ! Filter the gradient vector in time
+    call vector_cmult(this%dpx_f, 1.0_rp - eps)
+    call vector_cmult(this%dpy_f, 1.0_rp - eps)
+    call vector_cmult(this%dpz_f, 1.0_rp - eps)
+    call vector_add2s2(this%dpx_f, this%dpx_s, eps)
+    call vector_add2s2(this%dpy_f, this%dpy_s, eps)
+    call vector_add2s2(this%dpz_f, this%dpz_s, eps)
+
+    ! Project on the current flow direction and limit; no further filtering
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call duprat_update_dpds_device(this%dpx_s%x_d, this%dpy_s%x_d, &
-            this%dpz_s%x_d, this%u_s%x_d, this%v_s%x_d, this%w_s%x_d, &
+       call duprat_update_dpds_device(this%dpx_f%x_d, this%dpy_f%x_d, &
+            this%dpz_f%x_d, this%u_s%x_d, this%v_s%x_d, this%w_s%x_d, &
             this%n_x%x_d, this%n_y%x_d, this%n_z%x_d, &
-            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, eps, &
+            this%nu%x_d, this%rho_w%x_d, this%sampler%h%x_d, 1.0_rp, &
             this%dpds%x_d, this%n_nodes)
     else
-       call duprat_update_dpds_cpu(this%dpx_s%x, this%dpy_s%x, &
-            this%dpz_s%x, this%u_s%x, this%v_s%x, this%w_s%x, &
+       call duprat_update_dpds_cpu(this%dpx_f%x, this%dpy_f%x, &
+            this%dpz_f%x, this%u_s%x, this%v_s%x, this%w_s%x, &
             this%n_x%x, this%n_y%x, this%n_z%x, &
-            this%nu%x, this%rho_w%x, this%sampler%h%x, eps, this%dpds%x, &
+            this%nu%x, this%rho_w%x, this%sampler%h%x, 1.0_rp, this%dpds%x, &
             this%n_nodes)
     end if
 
